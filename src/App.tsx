@@ -17,6 +17,7 @@ import AILearningPage from "./pages/AILearning";
 import SettingsPage from "./pages/Settings";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import CVInteractiveLab from "./pages/CVInteractiveLab";
 
 const queryClient = new QueryClient();
 
@@ -41,6 +42,7 @@ const App = () => (
               <Route path="/ai-learning" element={<AILearningPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
+            <Route path="/cv-lab" element={<CVInteractiveLab />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
