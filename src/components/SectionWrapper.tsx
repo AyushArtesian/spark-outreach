@@ -40,7 +40,7 @@ export default function SectionWrapper({ id, title, label, number, children }: S
           </span>
           <h2 className="text-2xl md:text-3xl font-bold text-white">{title}</h2>
         </div>
-        <p className="text-blue-300 text-sm mb-8 ml-13">{label}</p>
+        <p className="text-blue-300 text-sm mb-8 pl-14">{label}</p>
         <div className="bg-gray-900/60 backdrop-blur-sm border border-gray-700/50 rounded-2xl p-6 md:p-8">
           {children}
         </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import SectionWrapper from '../SectionWrapper';
 
 interface MovingObject {
@@ -19,27 +19,29 @@ export default function MotionDetectionSection() {
   ]);
   const [showMotion, setShowMotion] = useState(true);
   const [trails, setTrails] = useState<{ x: number; y: number; id: number }[]>([]);
+  const objectsRef = useRef(objects);
+  objectsRef.current = objects;
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setObjects(prev => prev.map(obj => {
-        let nx = obj.x + obj.dx;
-        let ny = obj.y + obj.dy;
-        let ndx = obj.dx;
-        let ndy = obj.dy;
-        if (nx < 5 || nx > 95) ndx = -ndx;
-        if (ny < 5 || ny > 95) ndy = -ndy;
-        nx = Math.max(5, Math.min(95, nx));
-        ny = Math.max(5, Math.min(95, ny));
-        return { ...obj, x: nx, y: ny, dx: ndx, dy: ndy };
-      }));
-      setTrails(prev => {
-        const newTrails = objects.map(o => ({ x: o.x, y: o.y, id: o.id }));
-        return [...prev.slice(-30), ...newTrails];
+      setObjects(prev => {
+        const updated = prev.map(obj => {
+          let nx = obj.x + obj.dx;
+          let ny = obj.y + obj.dy;
+          let ndx = obj.dx;
+          let ndy = obj.dy;
+          if (nx < 5 || nx > 95) ndx = -ndx;
+          if (ny < 5 || ny > 95) ndy = -ndy;
+          nx = Math.max(5, Math.min(95, nx));
+          ny = Math.max(5, Math.min(95, ny));
+          return { ...obj, x: nx, y: ny, dx: ndx, dy: ndy };
+        });
+        setTrails(t => [...t.slice(-30), ...updated.map(o => ({ x: o.x, y: o.y, id: o.id }))]);
+        return updated;
       });
     }, 50);
     return () => clearInterval(timer);
-  }, [objects]);
+  }, []);
 
   return (
     <SectionWrapper id="motion-detection" title="Motion Detection" label="AI detects movement in videos" number={27}>

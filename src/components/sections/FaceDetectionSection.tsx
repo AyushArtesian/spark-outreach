@@ -27,15 +27,15 @@ export default function FaceDetectionSection() {
           return 0;
         }
         FACES.forEach((face, idx) => {
-          if (next >= face.y + face.h / 2 && !detected.includes(idx)) {
-            setDetected(d => [...d, idx]);
+          if (next >= face.y + face.h / 2) {
+            setDetected(d => d.includes(idx) ? d : [...d, idx]);
           }
         });
         return next;
       });
     }, 30);
     return () => clearInterval(timer);
-  }, [scanning, detected]);
+  }, [scanning]);
 
   useEffect(() => { startScan(); }, []);
 
