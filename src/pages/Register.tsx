@@ -53,10 +53,10 @@ export default function RegisterPage() {
             </div>
 
             <div>
-              <label className="text-sm font-medium text-foreground block mb-1.5">I am a...</label>
+            <label className="text-sm font-medium text-foreground block mb-1.5">I am a...</label>
               <select className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary">
-                <option>Solo Outreacher</option>
-                <option>Agency</option>
+                <option>Founder</option>
+                <option>Business Development</option>
                 <option>Sales Team</option>
               </select>
             </div>
