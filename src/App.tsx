@@ -7,14 +7,12 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import DashboardLayout from "./components/dashboard/DashboardLayout";
-import DashboardPage from "./pages/Dashboard";
-import CampaignsPage from "./pages/Campaigns";
-import NewCampaignPage from "./pages/NewCampaign";
-import ProspectsPage from "./pages/Prospects";
-import ReviewQueuePage from "./pages/ReviewQueue";
-import AnalyticsPage from "./pages/Analytics";
-import AILearningPage from "./pages/AILearning";
-import SettingsPage from "./pages/Settings";
+import LeadDashboard from "./pages/LeadDashboard";
+import CompanySetup from "./pages/CompanySetup";
+import LeadSearch from "./pages/LeadSearch";
+import LeadResults from "./pages/LeadResults";
+import LeadDetail from "./pages/LeadDetail";
+import LeadSettings from "./pages/LeadSettings";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
 
@@ -32,14 +30,12 @@ const App = () => (
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route element={<DashboardLayout />}>
-              <Route path="/dashboard" element={<DashboardPage />} />
-              <Route path="/campaigns" element={<CampaignsPage />} />
-              <Route path="/campaigns/new" element={<NewCampaignPage />} />
-              <Route path="/prospects" element={<ProspectsPage />} />
-              <Route path="/review" element={<ReviewQueuePage />} />
-              <Route path="/analytics" element={<AnalyticsPage />} />
-              <Route path="/ai-learning" element={<AILearningPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/dashboard" element={<LeadDashboard />} />
+              <Route path="/company-setup" element={<CompanySetup />} />
+              <Route path="/search" element={<LeadSearch />} />
+              <Route path="/leads" element={<LeadResults />} />
+              <Route path="/lead/:id" element={<LeadDetail />} />
+              <Route path="/settings" element={<LeadSettings />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>
