@@ -5,77 +5,53 @@ import { Link } from "react-router-dom";
 
 const plans = [
   {
-    name: "Starter",
-    price: "$49",
-    desc: "Perfect for solo outreachers",
-    features: ["500 prospects/mo", "1,000 emails/mo", "3 campaigns", "Basic AI personalization", "Email support"],
-    popular: false,
+    name: "Starter", price: "$49", desc: "For solo founders", popular: false,
+    features: ["100 leads / month", "1 location", "Basic scoring", "Email support", "5 AI outreach messages"],
   },
   {
-    name: "Pro",
-    price: "$99",
-    desc: "For growing sales teams",
-    features: ["5,000 prospects/mo", "10,000 emails/mo", "Unlimited campaigns", "Advanced AI + follow-ups", "LinkedIn integration", "Priority support"],
-    popular: true,
+    name: "Pro", price: "$149", desc: "For growing teams", popular: true,
+    features: ["1,000 leads / month", "Unlimited locations", "Advanced AI scoring", "Signal detection", "Unlimited AI outreach", "CRM integration", "Priority support"],
   },
   {
-    name: "Agency",
-    price: "$299",
-    desc: "For agencies & large teams",
-    features: ["Unlimited prospects", "50,000 emails/mo", "Multi-client management", "Custom AI training", "API access", "Dedicated account manager"],
-    popular: false,
+    name: "Agency", price: "$399", desc: "For BD teams", popular: false,
+    features: ["5,000 leads / month", "Multi-team access", "Custom AI training", "API access", "Dedicated CSM", "White-label reports", "Everything in Pro"],
   },
 ];
 
 export default function PricingSection() {
   return (
-    <section id="pricing" className="py-24">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          className="text-center mb-16"
-        >
-          <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">
-            Simple, Transparent <span className="gradient-text">Pricing</span>
-          </h2>
-          <p className="text-muted-foreground text-lg">Start free. Upgrade when you're ready.</p>
-        </motion.div>
-
-        <div className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+    <section id="pricing" className="py-20">
+      <div className="container mx-auto px-4">
+        <div className="text-center mb-12">
+          <h2 className="text-3xl font-display font-bold text-foreground">Simple, Transparent Pricing</h2>
+          <p className="text-muted-foreground mt-2">Start free. Scale when you're ready.</p>
+        </div>
+        <div className="grid md:grid-cols-3 gap-5 max-w-4xl mx-auto">
           {plans.map((plan, i) => (
             <motion.div
               key={plan.name}
-              initial={{ opacity: 0, y: 20 }}
+              initial={{ opacity: 0, y: 15 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true }}
               transition={{ delay: i * 0.1 }}
-              className={`glass-card rounded-2xl p-8 relative ${plan.popular ? "border-primary/50 glow-primary scale-105" : ""}`}
+              className={`p-6 rounded-2xl border shadow-sm ${plan.popular ? "border-primary/30 bg-primary/5 ring-1 ring-primary/20" : "border-border/50 bg-card"}`}
             >
-              {plan.popular && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full gradient-primary text-xs font-bold text-primary-foreground">
-                  Most Popular
-                </div>
-              )}
-              <h3 className="font-display font-bold text-xl mb-1 text-foreground">{plan.name}</h3>
-              <p className="text-sm text-muted-foreground mb-4">{plan.desc}</p>
-              <div className="mb-6">
-                <span className="text-4xl font-display font-bold text-foreground">{plan.price}</span>
-                <span className="text-muted-foreground">/mo</span>
+              {plan.popular && <div className="text-xs font-semibold text-primary mb-3">Most Popular</div>}
+              <h3 className="font-display font-bold text-foreground text-lg">{plan.name}</h3>
+              <p className="text-xs text-muted-foreground">{plan.desc}</p>
+              <div className="mt-4 mb-6">
+                <span className="text-3xl font-display font-bold text-foreground">{plan.price}</span>
+                <span className="text-muted-foreground text-sm">/mo</span>
               </div>
-              <ul className="space-y-3 mb-8">
+              <ul className="space-y-2 mb-6">
                 {plan.features.map((f) => (
                   <li key={f} className="flex items-center gap-2 text-sm text-foreground">
-                    <Check className="w-4 h-4 text-success shrink-0" />
-                    {f}
+                    <Check className="w-4 h-4 text-success shrink-0" /> {f}
                   </li>
                 ))}
               </ul>
               <Link to="/register">
-                <Button variant={plan.popular ? "gradient" : "outline"} className="w-full">
-                  Get Started
-                </Button>
+                <Button variant={plan.popular ? "gradient" : "outline"} className="w-full">Get Started</Button>
               </Link>
             </motion.div>
           ))}

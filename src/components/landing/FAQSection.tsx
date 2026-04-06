@@ -1,39 +1,26 @@
-import { motion } from "framer-motion";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 
 const faqs = [
-  { q: "How does the AI personalize messages?", a: "Our AI analyzes prospect data including LinkedIn activity, company news, job changes, and industry trends to craft unique messages for each prospect." },
-  { q: "Can I connect my own email accounts?", a: "Yes! We support Gmail, Outlook, and custom SMTP servers. You can connect multiple accounts for higher sending volumes." },
-  { q: "Is there a risk of getting flagged as spam?", a: "We use smart sending limits, warm-up protocols, and human-like sending patterns to maintain high deliverability rates." },
-  { q: "How many prospects can I find per month?", a: "It depends on your plan — from 500/mo on Starter to unlimited on Agency. All prospects are enriched with verified emails." },
-  { q: "Can I use OutreachAI for LinkedIn outreach?", a: "Absolutely. We support LinkedIn connection requests, DMs, and InMails alongside email outreach." },
-  { q: "What happens during the free trial?", a: "You get full Pro features for 14 days. No credit card required. Cancel anytime." },
+  { q: "How does the AI know which leads are good for me?", a: "You set up your company profile — services, tech stack, past projects, and target industries. The AI uses this context to match and score every lead based on how well they align with your proven capabilities." },
+  { q: "Is this just another lead scraper?", a: "No. Generic scrapers give you bulk data. We give you ranked, scored leads with clear reasoning — why each company is a fit, what signals we detected, and a suggested outreach message." },
+  { q: "What signals does the AI detect?", a: "Hiring activity, funding rounds, technology adoption, expansion plans, RFPs, growth indicators, and more. Each signal is factored into the lead score." },
+  { q: "How accurate is the lead scoring?", a: "Our users report a 23% average conversion rate on high-priority leads — compared to 2-3% industry average for cold outreach." },
+  { q: "Can I integrate with my CRM?", a: "Yes. We support HubSpot, Salesforce, and Pipedrive integrations on Pro and Agency plans. You can also export leads as CSV." },
+  { q: "Is there a free trial?", a: "Yes! Start with 25 free leads — no credit card required. See the quality before you commit." },
 ];
 
 export default function FAQSection() {
   return (
-    <section className="py-24">
-      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          className="text-center mb-16"
-        >
-          <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">
-            Frequently Asked <span className="gradient-text">Questions</span>
-          </h2>
-        </motion.div>
-
-        <Accordion type="single" collapsible className="space-y-3">
+    <section id="faq" className="py-20 bg-muted/30">
+      <div className="container mx-auto px-4 max-w-2xl">
+        <div className="text-center mb-12">
+          <h2 className="text-3xl font-display font-bold text-foreground">Frequently Asked Questions</h2>
+        </div>
+        <Accordion type="single" collapsible className="space-y-2">
           {faqs.map((faq, i) => (
-            <AccordionItem key={i} value={`faq-${i}`} className="glass-card rounded-xl px-6 border-border/50">
-              <AccordionTrigger className="text-left font-medium text-foreground hover:no-underline">
-                {faq.q}
-              </AccordionTrigger>
-              <AccordionContent className="text-muted-foreground">
-                {faq.a}
-              </AccordionContent>
+            <AccordionItem key={i} value={`faq-${i}`} className="bg-card border border-border/50 rounded-xl px-5">
+              <AccordionTrigger className="text-sm font-medium text-foreground hover:no-underline">{faq.q}</AccordionTrigger>
+              <AccordionContent className="text-sm text-muted-foreground">{faq.a}</AccordionContent>
             </AccordionItem>
           ))}
         </Accordion>
