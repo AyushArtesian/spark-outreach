@@ -1,51 +1,37 @@
 import { motion } from "framer-motion";
-import { Search, MessageSquare, GitBranch, BarChart3, Mail, Brain } from "lucide-react";
+import { Brain, Target, TrendingUp, Search, Shield, Zap } from "lucide-react";
 
 const features = [
-  { icon: Search, title: "AI Prospect Scraping", desc: "Automatically find and enrich thousands of ideal prospects from LinkedIn, Apollo, and more." },
-  { icon: MessageSquare, title: "Hyper-Personalized Messages", desc: "AI crafts unique messages referencing recent posts, company news, and pain points." },
-  { icon: GitBranch, title: "Smart Follow-up Sequences", desc: "Multi-step sequences that adapt based on prospect behavior and engagement." },
-  { icon: BarChart3, title: "Lead Scoring Engine", desc: "AI scores every prospect based on engagement signals to prioritize hot leads." },
-  { icon: Mail, title: "Open/Reply Tracking", desc: "Real-time tracking of opens, clicks, and replies across all channels." },
-  { icon: Brain, title: "AI Learning Loop", desc: "Your AI improves with every campaign, learning what messages convert best." },
+  { icon: Brain, title: "Context-Aware AI", desc: "AI learns your services, past wins, and strengths to find leads that actually convert." },
+  { icon: Search, title: "Market Scanning", desc: "Scans companies in your target location for hiring signals, funding, and growth patterns." },
+  { icon: Target, title: "Precision Matching", desc: "Matches opportunities with your proven expertise — not just keyword overlap." },
+  { icon: TrendingUp, title: "Lead Scoring", desc: "Every lead gets a conversion probability score with clear reasoning." },
+  { icon: Shield, title: "Signal Detection", desc: "Detects hiring, funding, expansion, and technology signals in real-time." },
+  { icon: Zap, title: "Instant Outreach", desc: "AI-generated outreach messages personalized to each lead's context." },
 ];
+
+const container = { hidden: {}, show: { transition: { staggerChildren: 0.08 } } };
+const item = { hidden: { opacity: 0, y: 15 }, show: { opacity: 1, y: 0 } };
 
 export default function FeaturesSection() {
   return (
-    <section id="features" className="py-24 relative">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          viewport={{ once: true }}
-          className="text-center mb-16"
-        >
-          <h2 className="text-3xl sm:text-4xl font-display font-bold mb-4">
-            Everything You Need to <span className="gradient-text">Close More Deals</span>
-          </h2>
-          <p className="text-muted-foreground text-lg max-w-2xl mx-auto">
-            A complete AI outreach platform that handles prospecting, messaging, and optimization.
-          </p>
-        </motion.div>
-
-        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {features.map((f, i) => (
-            <motion.div
-              key={f.title}
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ delay: i * 0.1 }}
-              className="glass-card rounded-xl p-6 hover:border-primary/30 transition-all duration-300 group"
-            >
-              <div className="w-12 h-12 rounded-lg gradient-primary flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                <f.icon className="w-6 h-6 text-primary-foreground" />
+    <section id="features" className="py-20 bg-muted/30">
+      <div className="container mx-auto px-4">
+        <div className="text-center mb-12">
+          <h2 className="text-3xl font-display font-bold text-foreground">Intelligent Lead Discovery</h2>
+          <p className="text-muted-foreground mt-2 max-w-lg mx-auto">Not another generic scraper. This platform understands your business and finds opportunities that match.</p>
+        </div>
+        <motion.div variants={container} initial="hidden" whileInView="show" viewport={{ once: true }} className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {features.map((f) => (
+            <motion.div key={f.title} variants={item} className="p-6 rounded-2xl bg-card border border-border/50 shadow-sm hover:shadow-md hover:border-primary/20 transition-all">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                <f.icon className="w-5 h-5 text-primary" />
               </div>
-              <h3 className="font-display font-semibold text-lg mb-2 text-foreground">{f.title}</h3>
-              <p className="text-muted-foreground text-sm leading-relaxed">{f.desc}</p>
+              <h3 className="font-display font-semibold text-foreground mb-2">{f.title}</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">{f.desc}</p>
             </motion.div>
           ))}
-        </div>
+        </motion.div>
       </div>
     </section>
   );
