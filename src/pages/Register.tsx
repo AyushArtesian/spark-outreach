@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Zap, User, Mail, Lock, Building, ArrowRight } from "lucide-react";
+import { Sparkles, User, Mail, Lock, Building, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Link } from "react-router-dom";
 
@@ -13,9 +13,9 @@ export default function RegisterPage() {
         <div className="glass-card rounded-2xl p-8">
           <div className="flex items-center justify-center gap-2 mb-8">
             <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center">
-              <Zap className="w-6 h-6 text-primary-foreground" />
+              <Sparkles className="w-6 h-6 text-primary-foreground" />
             </div>
-            <span className="font-display font-bold text-2xl text-foreground">OutreachAI</span>
+            <span className="font-display font-bold text-2xl text-foreground">LeadIntel AI</span>
           </div>
 
           <h1 className="text-xl font-display font-bold text-foreground text-center mb-2">Start Your Free Trial</h1>
