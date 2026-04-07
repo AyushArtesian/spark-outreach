@@ -1,177 +1,313 @@
 # Spark Outreach
 
-A full-stack outreach platform for building company profiles, generating rich company embeddings, and testing semantic retrieval through a UI.
+A complete local SaaS-style outreach platform with company profile enrichment, website scraping, semantic embeddings, AI-assisted retrieval, and a React-based admin UI.
 
-## Overview
+## Project Summary
 
-This project combines a modern React frontend with a FastAPI backend and MongoDB persistence to support:
-- company profile setup and contextual enrichment
-- website and portfolio scraping
-- local embedding generation using SentenceTransformers
-- company embedding testing through a settings UI
-- JWT authentication and protected API routes
+Spark Outreach combines:
 
-## What we have built so far
+- a FastAPI backend for company profiles, scraping, embeddings, and AI services
+- a React + TypeScript frontend for auth, profile setup, campaign/lead management, and embedding validation
+- MongoDB for persistent user, company, campaign, and lead data
+- local semantic embedding generation using `sentence-transformers`
 
-### Backend
-- FastAPI backend with clean routing and authentication
-- MongoDB via MongoEngine for persistent company profiles and user data
-- JWT auth using `python-jose` and Argon2 password hashing
-- Company profile data model including:
-  - company details, services, technologies, target industries, team expertise
-  - manual projects, portfolio URLs, GitHub, LinkedIn, Upwork
-  - cached scraped website and portfolio content
-- Web scraping service to fetch:
-  - company website content and internal pages
-  - GitHub user/org/repo metadata
-  - LinkedIn profile fallback signals
-  - Upwork agency fallback signals
-  - additional portfolio URLs
-- Local embedding generation using `sentence-transformers`:
-  - model: `paraphrase-mpnet-base-v2`
-  - rich 768-dimensional semantic embeddings
-- Embedding text builder that includes both:
-  - manual profile fields and project data
-  - fetched website/portfolio content
-- Company profile query endpoint: `POST /api/v1/company/profile/query`
-  - supports natural language questions against company context
-  - returns top matching content chunks with relevance scores
-- Graceful fallback behavior for blocked external sources
+The system is designed to turn company profile data and website content into searchable, queryable knowledge for outreach and lead targeting.
 
-### Frontend
-- React + TypeScript application using Vite
-- Tailwind CSS with shadcn/ui style components
-- Protected routes and auth state management
-- Company setup wizard for entering profile and portfolio details
-- Settings page with a built-in embedding test UI for direct company query testing
-- API client utility with automatic JWT authorization
-- `companyAPI.queryProfile()` support for embedding QA requests
+---
 
-## Tech Stack
+## What the System Does
 
-### Frontend
-- React 18
-- TypeScript
-- Vite
-- Tailwind CSS
-- shadcn/ui components
-- React Router DOM
-- React Query
-- Framer Motion
-- Lucide Icons
-- Zod
+- Collects and stores company profile details
+- Scrapes company websites and portfolio sources for real business content
+- Generates rich 768-dimensional semantic embeddings locally
+- Enables natural language company profile querying
+- Provides a frontend testing UI for embedding quality
+- Supports campaign and lead workflows with AI-assisted message generation
 
-### Backend
-- Python 3.x
-- FastAPI
-- Uvicorn
-- MongoDB + MongoEngine
-- Python-JOSE
-- passlib[argon2]
-- Pydantic / pydantic-settings
-- aiohttp
-- BeautifulSoup4
-- sentence-transformers
-- google-genai (optional Gemini support)
+---
 
-### AI / Embeddings
-- `sentence-transformers` local model
-- `paraphrase-mpnet-base-v2` for high-quality semantic vectors
-- Local embedding generation after first model download
-- No OpenAI API key required for embeddings
+## Backend Overview
+
+### Core Backend Files
+
+- `backend/app/main.py`
+  - FastAPI app bootstrap
+  - CORS middleware
+  - root and health endpoints
+  - router registration for auth, campaigns, leads, AI, and company
+
+- `backend/app/config.py`
+  - environment and configuration settings
+
+- `backend/app/database.py`
+  - MongoDB initialization and cleanup
+
+### Routers
+
+- `backend/app/routers/auth.py`
+  - `POST /api/v1/auth/register`
+  - `POST /api/v1/auth/login`
+  - `GET /api/v1/auth/me`
+
+- `backend/app/routers/company.py`
+  - `POST /api/v1/company/profile`
+  - `GET /api/v1/company/profile`
+  - `PUT /api/v1/company/profile`
+  - `POST /api/v1/company/profile/generate-embeddings`
+  - `POST /api/v1/company/profile/query`
+  - `POST /api/v1/company/profile/generate-icp`
+  - `POST /api/v1/company/profile/complete-setup`
+
+- `backend/app/routers/campaigns.py`
+  - campaign CRUD and campaign operations
+
+- `backend/app/routers/leads.py`
+  - lead CRUD, bulk import, contact actions, and lead status management
+
+- `backend/app/routers/ai.py`
+  - `POST /api/v1/ai/rag-search`
+  - `POST /api/v1/ai/generate-message`
+  - `POST /api/v1/ai/create-embeddings`
+
+### Services
+
+- `backend/app/services/company_service.py`
+  - create/update company profile
+  - build embedding text from profile and portfolio content
+  - generate company embeddings locally
+  - query company profile using embeddings
+  - generate ICP / signal keywords
+  - complete setup flow
+
+- `backend/app/services/ai_service.py`
+  - local embedding generation using `sentence-transformers`
+  - query embeddings and similarity search
+  - AI text completion support (optional Gemini/OpenAI)
+
+- `backend/app/services/web_scraper.py`
+  - homepage and internal page scraping
+  - prioritized link extraction for About / Services / Solutions / Team pages
+  - HTML cleaning to remove navigation, footer, modal, and menu noise
+  - portfolio content aggregation from website, GitHub, LinkedIn, Upwork, and extra URLs
+
+- `backend/app/services/campaign_service.py`
+  - campaign data handling and business logic
+
+- `backend/app/services/lead_service.py`
+  - lead creation, update, and management logic
+
+### Models
+
+- `backend/app/models/user.py`
+  - user account fields and authentication data
+
+- `backend/app/models/company.py`
+  - company profile fields, portfolio data, content cache, and embeddings
+
+- `backend/app/models/campaign.py`
+  - campaign metadata and status
+
+- `backend/app/models/lead.py`
+  - lead contact details and lifecycle status
+
+- `backend/app/models/embedding.py`
+  - optional saved embedding metadata
+
+### Schemas
+
+- `backend/app/schemas/user.py`
+  - auth request/response models
+
+- `backend/app/schemas/company.py`
+  - company profile and query schemas
+
+- `backend/app/schemas/campaign.py`
+  - campaign request/response models
+
+- `backend/app/schemas/lead.py`
+  - lead request/response models
+
+### Utilities
+
+- `backend/app/utils/auth.py`
+  - JWT handling, password hashing, and token validation
+
+- `backend/app/utils/embeddings.py`
+  - embedding helper utilities and chunking
+
+- `backend/app/utils/response.py`
+  - response serialization helpers
+
+---
+
+## Frontend Overview
+
+### Core Frontend Files
+
+- `src/main.tsx`
+  - app bootstrap and rendering
+
+- `src/App.tsx`
+  - main routes and layout shell
+
+- `src/index.css`, `src/App.css`
+  - global styles and Tailwind config
+
+- `src/services/api.ts`
+  - centralized API client for auth, campaigns, leads, AI, and company endpoints
+  - automatic Bearer token injection
+
+### UI and Pages
+
+- `src/pages/Index.tsx` — landing page
+- `src/pages/Login.tsx` — login form
+- `src/pages/Register.tsx` — registration form
+- `src/pages/Dashboard.tsx` — dashboard overview
+- `src/pages/CompanySetup.tsx` — company onboarding and profile setup
+- `src/pages/Campaigns.tsx` — campaign management
+- `src/pages/NewCampaign.tsx` — campaign creation
+- `src/pages/ReviewQueue.tsx` — outreach review queue
+- `src/pages/Prospects.tsx` — prospect list page
+- `src/pages/LeadDashboard.tsx` — lead workspace
+- `src/pages/LeadDetail.tsx` — lead detail page
+- `src/pages/LeadResults.tsx` — lead results view
+- `src/pages/LeadSearch.tsx` — lead search interface
+- `src/pages/LeadSettings.tsx` — lead settings
+- `src/pages/Settings.tsx` — user settings and embedding test console
+- `src/pages/Analytics.tsx` — analytics and reporting
+- `src/pages/AILearning.tsx` — AI insights and learning section
+- `src/pages/NotFound.tsx` — 404 page
+
+### Components
+
+- `src/components/NavLink.tsx` — navigation link helper
+- `src/components/ThemeProvider.tsx` — theme context provider
+- `src/components/dashboard/` — dashboard layout components
+- `src/components/landing/` — landing page sections
+- `src/components/ui/` — shared UI primitives and shadcn/ui components
+
+### State and Helpers
+
+- `src/contexts/` — auth and global app contexts
+- `src/hooks/` — custom hooks used by pages
+- `src/lib/` — utility functions shared across the frontend
+
+---
+
+## Embedding and AI Details
+
+- Local semantic model: `paraphrase-mpnet-base-v2`
+- Embeddings are generated locally with `sentence-transformers`
+- Company profile text is built from:
+  - manual profile fields
+  - services, expertise, technologies, industries, projects
+  - website and portfolio content
+  - GitHub / LinkedIn / Upwork signals
+- Query against company profile uses embedding similarity plus exact keyword boosting for terms such as `.NET`, Azure, and Power Platform
+- ICP generation uses completion prompt logic, with safe fallback handling if external AI completion is unavailable
+
+---
 
 ## Setup Instructions
 
 ### Backend
 
-1. Create and activate Python virtual environment:
-   ```bash
-   cd backend
-   python -m venv venv
-   .\venv\Scripts\activate
-   ```
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Configure environment variables in `backend/.env`:
-   ```env
-   APP_NAME=Spark Outreach API
-   DEBUG=True
-   MONGO_URL=mongodb://localhost:27017
-   MONGO_DB_NAME=spark_outreach
-   SECRET_KEY=your-secret-key
-   ACCESS_TOKEN_EXPIRE_MINUTES=30
-   GEMINI_API_KEY=
-   OPENAI_API_KEY=
-   HF_API_KEY=
-   ```
-4. Run backend:
-   ```bash
-   .\venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-   ```
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+Create or update `backend/.env` with:
+
+```env
+APP_NAME=Spark Outreach API
+DEBUG=True
+MONGO_URL=mongodb://localhost:27017
+MONGO_DB_NAME=spark_outreach
+SECRET_KEY=your-secret-key
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+GEMINI_API_KEY=
+OPENAI_API_KEY=
+HF_API_KEY=
+```
+
+Run the backend:
+
+```powershell
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
 ### Frontend
 
-1. From the project root:
-   ```bash
-   npm install
-   ```
-2. Start the frontend:
-   ```bash
-   npm run dev
-   ```
-3. Open the app in the browser at `http://localhost:5173`
+```bash
+npm install
+npm run dev
+```
 
-## How to Test Embeddings
-
-1. Create or update your company profile through the company setup flow.
-2. Generate company embeddings using the backend endpoint or UI flow.
-3. Open `Settings` and select the new `Embedding Test` tab.
-4. Enter a question about your company and run the test.
-5. Review the top matching chunks and score results.
-
-### API Test Option
-
-Alternatively, you can call the backend directly:
-- `POST /api/v1/company/profile/query`
-- body: `{ "query": "What web development services do we offer?", "top_k": 3 }`
-- requires Bearer JWT authorization
-
-## Current Features
-
-- Company profile creation and update
-- Company website, GitHub, LinkedIn, Upwork, and portfolio scraping
-- Local sentence-transformer embeddings with richer semantic dimension
-- Embedding test UI in Settings
-- API route for company profile semantic querying
-- Graceful handling of blocked or unavailable external sources
-
-## Future Work
-
-- Add chat-style conversational QA over company embeddings
-- Build a “single answer” response layer from top retrieval results
-- Add campaign-level RAG and lead matching using company embeddings
-- Add direct lead scoring using company and campaign semantic similarity
-- Add OpenAI/Gemini prompt-based summaries and content generation
-- Improve scraper reliability for multiple business sites and content sources
-- Add more advanced analytics and lead signal extraction
-
-## Notes
-
-- Upwork and LinkedIn scraping may be blocked by bot protection; the system preserves source signals even when direct scraping fails.
-- GitHub data may be rate-limited without authentication, but fallback scraping is available.
-- The current embedding model is local and does not require external paid APIs for inference.
-
-## Project Structure
-
-- `backend/` - FastAPI backend, models, routers, services, and embedding logic
-- `src/` - React frontend pages, components, and API client
-- `public/` - static assets
-- `package.json` - frontend dependencies and scripts
-- `backend/requirements.txt` - backend Python dependencies
-- `README.md` - project documentation
+Open the frontend app at the Vite URL shown in the terminal, usually `http://localhost:5173`.
 
 ---
 
-This README reflects the current state of the project and the major work completed so far, including company context enrichment, local semantic embeddings, embedding testing UI, and the foundational outreach platform architecture.
+## Key API Endpoints
+
+### Authentication
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `GET /api/v1/auth/me`
+
+### Company
+
+- `POST /api/v1/company/profile`
+- `GET /api/v1/company/profile`
+- `PUT /api/v1/company/profile`
+- `POST /api/v1/company/profile/generate-embeddings`
+- `POST /api/v1/company/profile/query`
+- `POST /api/v1/company/profile/generate-icp`
+- `POST /api/v1/company/profile/complete-setup`
+
+### AI
+
+- `POST /api/v1/ai/rag-search`
+- `POST /api/v1/ai/generate-message`
+- `POST /api/v1/ai/create-embeddings`
+
+### Campaigns / Leads
+
+- campaign and lead routes are available under `/api/v1/campaigns` and `/api/v1/leads`
+
+---
+
+## How to Use the Embedding Test
+
+- Create or update a company profile
+- Generate embeddings via backend or profile flow
+- Open `Settings` and go to `Embedding Test`
+- Enter a question about the company
+- Run the test and review returned chunk text with scores
+
+---
+
+## Project Structure
+
+- `backend/` — backend application code, models, schemas, services, and routers
+- `src/` — frontend source code, pages, components, contexts, and API client
+- `public/` — static web assets
+- `package.json` — frontend dependencies and scripts
+- `backend/requirements.txt` — backend Python dependencies
+- `README.md` — project documentation
+
+---
+
+## Notes
+
+- The web scraper is intentionally tuned to avoid navigation/menu noise and prioritize actual company content.
+- External sources such as LinkedIn and Upwork may fail to scrape due to anti-bot restrictions; fallback signals are preserved.
+- The local embedding pipeline does not require a paid API key, but optional AI completion features may use Gemini/OpenAI when configured.
+- Use the frontend settings UI to validate embeddings before relying on retrieval results.
+
+---
+
+This README now documents the current system end-to-end, including backend architecture, frontend pages, AI/embedding behavior, and setup instructions.
