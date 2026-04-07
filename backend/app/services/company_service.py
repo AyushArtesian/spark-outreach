@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any
 from app.models.company import CompanyProfile
 from app.services.ai_service import generate_embeddings, generate_completion
 from app.services.web_scraper import fetch_all_portfolio_content, combine_portfolio_content
+from app.utils.embeddings import embedding_service
 from datetime import datetime
 import json
 
@@ -129,6 +130,51 @@ class CompanyService:
         
         print(f"Successfully generated embeddings for {profile.company_name}")
         return CompanyService.serialize_profile(profile)
+    
+    @staticmethod
+    async def query_company_profile(owner_id: str, query: str, top_k: int = 3) -> dict:
+        """Query company profile content using embeddings for relevance ranking."""
+        profile = CompanyProfile.objects(owner_id=owner_id).first()
+        if not profile:
+            raise ValueError("Company profile not found")
+
+        # Use cached portfolio content if available, otherwise empty dict
+        portfolio_content = profile.portfolio_content or {}
+
+        # Build the company text from manual fields and fetched content
+        company_text = CompanyService._build_embedding_text(profile, portfolio_content)
+        if not company_text:
+            return {"query": query, "results": []}
+
+        # Chunk the combined text for retrieval
+        chunks = embedding_service.chunk_text(company_text, chunk_size=250, overlap=50)
+        if not chunks:
+            return {"query": query, "results": []}
+
+        # Compute embeddings for the query and each chunk
+        query_embedding = await generate_embeddings(query)
+        chunk_embeddings = []
+        for chunk in chunks:
+            chunk_embeddings.append(await generate_embeddings(chunk))
+
+        similar = await embedding_service.similarity_search(
+            query_embedding,
+            chunk_embeddings,
+            top_k=top_k
+        )
+
+        results = []
+        for idx, score in similar:
+            results.append({
+                "index": idx,
+                "score": score,
+                "chunk": chunks[idx]
+            })
+
+        return {
+            "query": query,
+            "results": results
+        }
     
     @staticmethod
     async def generate_icp_and_signals(owner_id: str) -> dict:

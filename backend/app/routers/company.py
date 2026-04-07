@@ -8,7 +8,9 @@ from app.schemas.company import (
     CompanyProfileCreateRequest,
     CompanyProfileUpdateRequest,
     CompanyProfileResponse,
-    CompanySetupStepRequest
+    CompanySetupStepRequest,
+    CompanyQueryRequest,
+    CompanyQueryResponse
 )
 from app.services.company_service import CompanyService
 from app.utils.auth import decode_token
@@ -133,6 +135,33 @@ async def generate_embeddings(authorization: Optional[str] = Header(None)):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate embeddings: {str(e)}"
+        )
+
+@router.post("/profile/query", response_model=CompanyQueryResponse)
+async def query_company_profile(
+    request: CompanyQueryRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """Query company details using embeddings and retrieve the most relevant company context."""
+    try:
+        from app.models.user import User
+        email = get_user_from_token(authorization)
+        user = User.objects(email=email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        response = await CompanyService.query_company_profile(
+            str(user.id),
+            request.query,
+            top_k=request.top_k
+        )
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query company profile: {str(e)}"
         )
 
 @router.post("/profile/generate-icp", response_model=CompanyProfileResponse)

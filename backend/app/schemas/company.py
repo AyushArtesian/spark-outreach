@@ -114,6 +114,23 @@ class CompanyProfileResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class CompanyQueryRequest(BaseModel):
+    """Request for company chat/query testing"""
+    query: str
+    top_k: int = 3
+
+
+class CompanyQueryResult(BaseModel):
+    index: int
+    score: float
+    chunk: str
+
+
+class CompanyQueryResponse(BaseModel):
+    query: str
+    results: List[CompanyQueryResult]
+
+
 class CompanySetupStepRequest(BaseModel):
     """Request for specific setup step"""
     step: str  # "basic_info", "services", "projects", "target_market", "review"
