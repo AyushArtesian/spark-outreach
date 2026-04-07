@@ -12,6 +12,7 @@ from app.utils.auth import (
     create_access_token,
     decode_token
 )
+from app.utils.response import serialize_user
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -46,7 +47,8 @@ async def register(user: UserCreate):
     )
     
     new_user.save()
-    return new_user
+    # Convert ObjectId to string for response
+    return serialize_user(new_user)
 
 @router.post("/login", response_model=Token)
 async def login(user: UserLogin):
@@ -105,4 +107,4 @@ async def get_current_user(authorization: Optional[str] = Header(None)):
             detail="User not found"
         )
     
-    return user
+    return serialize_user(user)

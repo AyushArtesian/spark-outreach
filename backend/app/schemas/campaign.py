@@ -1,9 +1,10 @@
 """
 Pydantic schemas for campaign operations
 """
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 from typing import Optional, Dict, Any
 from datetime import datetime
+from bson import ObjectId
 
 class CampaignBase(BaseModel):
     title: str
@@ -29,8 +30,8 @@ class CampaignUpdate(BaseModel):
     custom_instructions: Optional[str] = None
 
 class CampaignResponse(CampaignBase):
-    id: int
-    owner_id: int
+    id: str
+    owner_id: str
     status: str
     custom_instructions: Optional[str]
     max_leads: Optional[int]
@@ -40,6 +41,12 @@ class CampaignResponse(CampaignBase):
     updated_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+    
+    @field_serializer('id', 'owner_id')
+    def serialize_id(self, value):
+        if isinstance(value, ObjectId):
+            return str(value)
+        return value
     
     class Config:
         from_attributes = True

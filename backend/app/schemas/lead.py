@@ -1,9 +1,10 @@
 """
 Pydantic schemas for lead operations
 """
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_serializer
 from typing import Optional, Dict, Any
 from datetime import datetime
+from bson import ObjectId
 
 class LeadBase(BaseModel):
     name: str
@@ -14,7 +15,7 @@ class LeadBase(BaseModel):
     industry: Optional[str] = None
 
 class LeadCreate(LeadBase):
-    campaign_id: int
+    campaign_id: str
     raw_data: Optional[Dict[str, Any]] = None
 
 class LeadUpdate(BaseModel):
@@ -28,8 +29,8 @@ class LeadUpdate(BaseModel):
     ai_notes: Optional[str] = None
 
 class LeadResponse(LeadBase):
-    id: int
-    campaign_id: int
+    id: str
+    campaign_id: str
     status: str
     relevance_score: Optional[float]
     message_sent: bool
@@ -39,6 +40,12 @@ class LeadResponse(LeadBase):
     converted: bool
     created_at: datetime
     updated_at: datetime
+    
+    @field_serializer('id', 'campaign_id')
+    def serialize_id(self, value):
+        if isinstance(value, ObjectId):
+            return str(value)
+        return value
     
     class Config:
         from_attributes = True
@@ -52,5 +59,5 @@ class LeadDetailResponse(LeadResponse):
     replied_at: Optional[datetime] = None
 
 class BulkLeadCreate(BaseModel):
-    campaign_id: int
+    campaign_id: str
     leads: list[LeadCreate]

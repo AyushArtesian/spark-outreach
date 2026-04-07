@@ -10,6 +10,7 @@ from app.schemas.campaign import CampaignCreate, CampaignUpdate, CampaignRespons
 from app.services.campaign_service import campaign_service
 from app.services.ai_service import ai_service
 from app.utils.auth import decode_token
+from app.utils.response import serialize_campaign
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -61,7 +62,7 @@ async def create_campaign(
     # Create embeddings for the campaign content
     await ai_service.create_campaign_embeddings(db_campaign)
     
-    return db_campaign
+    return serialize_campaign(db_campaign)
 
 @router.get("", response_model=List[CampaignResponse])
 async def get_campaigns(
@@ -73,7 +74,7 @@ async def get_campaigns(
     current_user = get_current_user_from_token(authorization)
     
     campaigns = campaign_service.get_user_campaigns(str(current_user.id), skip, limit)
-    return campaigns
+    return [serialize_campaign(c) for c in campaigns]
 
 @router.get("/{campaign_id}", response_model=CampaignDetailResponse)
 async def get_campaign(
@@ -94,7 +95,7 @@ async def get_campaign(
             detail="Campaign not found"
         )
     
-    return campaign
+    return serialize_campaign(campaign)
 
 @router.put("/{campaign_id}", response_model=CampaignResponse)
 async def update_campaign(
@@ -117,7 +118,7 @@ async def update_campaign(
         )
     
     updated_campaign = campaign_service.update_campaign(campaign_id, campaign_update)
-    return updated_campaign
+    return serialize_campaign(updated_campaign)
 
 @router.post("/{campaign_id}/start", response_model=CampaignResponse)
 async def start_campaign(
@@ -139,7 +140,7 @@ async def start_campaign(
         )
     
     started_campaign = campaign_service.start_campaign(campaign_id)
-    return started_campaign
+    return serialize_campaign(started_campaign)
 
 @router.delete("/{campaign_id}")
 async def delete_campaign(

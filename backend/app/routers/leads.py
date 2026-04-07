@@ -11,6 +11,7 @@ from app.schemas.lead import LeadCreate, LeadUpdate, LeadResponse, LeadDetailRes
 from app.services.lead_service import lead_service
 from app.services.ai_service import ai_service
 from app.utils.auth import decode_token
+from app.utils.response import serialize_lead
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -71,7 +72,7 @@ async def create_lead(
     db_lead.relevance_score = relevance_score
     db_lead.save()
     
-    return db_lead
+    return serialize_lead(db_lead)
 
 @router.post("/bulk", response_model=List[LeadResponse])
 async def create_bulk_leads(
@@ -96,7 +97,7 @@ async def create_bulk_leads(
         db_lead.relevance_score = relevance_score
         db_lead.save()
     
-    return db_leads
+    return [serialize_lead(lead) for lead in db_leads]
 
 @router.get("/{lead_id}", response_model=LeadDetailResponse)
 async def get_lead(
@@ -124,7 +125,7 @@ async def get_lead(
             detail="Not authorized to view this lead"
         )
     
-    return lead
+    return serialize_lead(lead)
 
 @router.get("/campaign/{campaign_id}", response_model=List[LeadResponse])
 async def get_campaign_leads(
@@ -150,7 +151,7 @@ async def get_campaign_leads(
     else:
         leads = lead_service.get_campaign_leads(campaign_id, skip, limit)
     
-    return leads
+    return [serialize_lead(l) for l in leads]
 
 @router.put("/{lead_id}", response_model=LeadResponse)
 async def update_lead(
@@ -180,7 +181,7 @@ async def update_lead(
         )
     
     updated_lead = lead_service.update_lead(lead_id, lead_update)
-    return updated_lead
+    return serialize_lead(updated_lead)
 
 @router.post("/{lead_id}/contact", response_model=LeadResponse)
 async def contact_lead(
@@ -214,7 +215,7 @@ async def contact_lead(
     
     # Mark as contacted
     updated_lead = lead_service.mark_as_contacted(lead_id)
-    return updated_lead
+    return serialize_lead(updated_lead)
 
 @router.delete("/{lead_id}")
 async def delete_lead(
