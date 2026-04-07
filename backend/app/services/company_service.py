@@ -138,44 +138,158 @@ class CompanyService:
         if not profile:
             raise ValueError("Company profile not found")
 
-        # Use cached portfolio content if available, otherwise empty dict
         portfolio_content = profile.portfolio_content or {}
-
-        # Build the company text from manual fields and fetched content
-        company_text = CompanyService._build_embedding_text(profile, portfolio_content)
-        if not company_text:
+        segments = CompanyService._build_company_retrieval_segments(profile, portfolio_content)
+        if not segments:
             return {"query": query, "results": []}
 
-        # Chunk the combined text for retrieval
-        chunks = embedding_service.chunk_text(company_text, chunk_size=250, overlap=50)
+        chunks: List[str] = []
+
+        # Add an overall company overview chunk first for broad questions.
+        company_text = CompanyService._build_embedding_text(profile, portfolio_content)
+        chunks.extend(embedding_service.chunk_text(company_text, chunk_size=250, overlap=60))
+
+        for segment in segments:
+            chunks.extend(embedding_service.chunk_text(segment, chunk_size=250, overlap=60))
+
+        # Remove trivial chunks and duplicates
+        normalized = []
+        seen = set()
+        for chunk in chunks:
+            cleaned = chunk.strip()
+            if CompanyService._is_trivial_chunk(cleaned):
+                continue
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        chunks = normalized
+
         if not chunks:
             return {"query": query, "results": []}
 
-        # Compute embeddings for the query and each chunk
+        if not chunks:
+            return {"query": query, "results": []}
+
         query_embedding = await generate_embeddings(query)
-        chunk_embeddings = []
-        for chunk in chunks:
-            chunk_embeddings.append(await generate_embeddings(chunk))
+        chunk_embeddings = [await generate_embeddings(chunk) for chunk in chunks]
 
         similar = await embedding_service.similarity_search(
             query_embedding,
             chunk_embeddings,
-            top_k=top_k
+            top_k=min(top_k, len(chunks))
         )
 
         results = []
         for idx, score in similar:
+            chunk_text = chunks[idx]
+            boost = CompanyService._boost_exact_keyword_matches(query, chunk_text)
             results.append({
                 "index": idx,
-                "score": score,
-                "chunk": chunks[idx]
+                "score": min(1.0, score + boost),
+                "chunk": chunk_text
             })
 
+        # Sort again after boosting
+        results.sort(key=lambda x: x["score"], reverse=True)
         return {
             "query": query,
-            "results": results
+            "results": results[:top_k]
         }
     
+    @staticmethod
+    def _build_company_retrieval_segments(profile: CompanyProfile, portfolio_content: Dict[str, str]) -> List[str]:
+        """Build smaller retrieval segments from company profile data and fetched content."""
+        segments: List[str] = []
+
+        if profile.company_name:
+            segments.append(f"Company: {profile.company_name}")
+
+        if profile.company_description:
+            segments.append(f"Description: {profile.company_description}")
+
+        if profile.services:
+            segments.append(f"Services: {', '.join(profile.services)}")
+
+        if profile.expertise_areas:
+            segments.append(f"Expertise: {', '.join(profile.expertise_areas)}")
+
+        if profile.technologies:
+            segments.append(f"Technologies: {', '.join(profile.technologies)}")
+
+        if profile.target_industries:
+            segments.append(f"Target Industries: {', '.join(profile.target_industries)}")
+
+        if profile.target_locations:
+            segments.append(f"Target Locations: {', '.join(profile.target_locations)}")
+
+        if profile.team_expertise:
+            segments.append(f"Team Expertise: {', '.join(profile.team_expertise)}")
+
+        if profile.projects:
+            for proj in profile.projects:
+                proj_text = f"Project: {proj.get('title', 'Untitled')} - {proj.get('description', '')}"
+                if proj.get('technologies'):
+                    proj_text += f" (Tech: {', '.join(proj.get('technologies'))})"
+                segments.append(proj_text)
+
+        if profile.company_website:
+            segments.append(f"Website: {profile.company_website}")
+
+        if profile.github_url:
+            segments.append(f"GitHub: {profile.github_url}")
+
+        if profile.linkedin_url:
+            segments.append(f"LinkedIn: {profile.linkedin_url}")
+
+        if profile.upwork_id:
+            segments.append(f"Upwork: {profile.upwork_id}")
+
+        if profile.portfolio_urls:
+            segments.append(f"Portfolio URLs: {', '.join(profile.portfolio_urls)}")
+
+        for source, content in portfolio_content.items():
+            if content:
+                segments.append(f"Source: {source}\n{content}")
+
+        return segments
+
+    @staticmethod
+    def _boost_exact_keyword_matches(query: str, segment: str) -> float:
+        """Boost score for exact keyword matches on important terms."""
+        boost = 0.0
+        lowered = query.lower()
+        segment_lower = segment.lower()
+
+        keywords = [".net", "dotnet", "microsoft", "asp.net", "c#", "net maui", "maui"]
+        for token in keywords:
+            if token in lowered and token in segment_lower:
+                boost += 0.18
+
+        # Additional boost for exact technology names mentioned in the query
+        if "power apps" in lowered and "power apps" in segment_lower:
+            boost += 0.15
+        if "power platform" in lowered and "power platform" in segment_lower:
+            boost += 0.15
+        if "azure" in lowered and "azure" in segment_lower:
+            boost += 0.1
+
+        return boost
+
+    @staticmethod
+    def _is_trivial_chunk(chunk: str) -> bool:
+        """Ignore tiny or metadata-only chunks that are not useful for QA."""
+        if len(chunk.split()) <= 6:
+            return True
+        lowered = chunk.lower()
+        if lowered.startswith("website:") or lowered.startswith("github:") or lowered.startswith("linkedin:") or lowered.startswith("upwork:"):
+            return True
+        if lowered.startswith("source:") and len(lowered.split()) < 10:
+            return True
+        if lowered.startswith("projects:") and len(lowered.split()) <= 6:
+            return True
+        return False
+
     @staticmethod
     async def generate_icp_and_signals(owner_id: str) -> dict:
         """
