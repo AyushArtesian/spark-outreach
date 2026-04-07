@@ -211,3 +211,14 @@ export const aiAPI = {
     });
   },
 };
+
+// Company API
+export const companyAPI = {
+  queryProfile: async (query: string, topK = 3) => {
+    return apiCall("/company/profile/query", {
+      method: "POST",
+      body: JSON.stringify({ query, top_k: topK }),
+      requiresAuth: true,
+    });
+  },
+};

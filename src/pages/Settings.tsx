@@ -1,13 +1,15 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { User, Link2, Bell, Gauge, CreditCard, Save } from "lucide-react";
+import { User, Link2, Bell, Gauge, CreditCard, Save, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/contexts/AuthContext";
+import { companyAPI } from "@/services/api";
 
 const tabs = [
   { label: "Profile", icon: User },
   { label: "Connected Accounts", icon: Link2 },
+  { label: "Embedding Test", icon: Sparkles },
   { label: "Sending Limits", icon: Gauge },
   { label: "Notifications", icon: Bell },
   { label: "Billing", icon: CreditCard },
@@ -27,6 +29,11 @@ export default function SettingsPage() {
     email: "",
     username: "",
   });
+  const [queryText, setQueryText] = useState("");
+  const [topK, setTopK] = useState(3);
+  const [queryResults, setQueryResults] = useState<Array<{ index: number; score: number; chunk: string }>>([]);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
 
   // Populate form with user data on mount
   useEffect(() => {
@@ -47,6 +54,26 @@ export default function SettingsPage() {
       .join("")
       .toUpperCase()
       .slice(0, 2);
+  };
+
+  const handleQuerySubmit = async () => {
+    if (!queryText.trim()) {
+      setQueryError("Please enter a question to test the embeddings.");
+      return;
+    }
+
+    setQueryError(null);
+    setQueryLoading(true);
+    setQueryResults([]);
+
+    try {
+      const result = await companyAPI.queryProfile(queryText, topK);
+      setQueryResults(result.results || []);
+    } catch (error: any) {
+      setQueryError(error?.message || "Something went wrong while querying the company embeddings.");
+    } finally {
+      setQueryLoading(false);
+    }
   };
 
   return (
@@ -133,6 +160,58 @@ export default function SettingsPage() {
                   </Button>
                 </div>
               ))}
+            </div>
+          )}
+
+          {activeTab === "Embedding Test" && (
+            <div className="space-y-6">
+              <h2 className="font-display font-semibold text-foreground">Embedding Test</h2>
+              <p className="text-sm text-muted-foreground">Ask a question about your company profile and see if the embedding system returns the most relevant context.</p>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-foreground block mb-1.5">Test Question</label>
+                  <textarea
+                    rows={4}
+                    value={queryText}
+                    onChange={(e) => setQueryText(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    placeholder="What services do we offer in Microsoft Power Platform?"
+                  />
+                </div>
+                <div className="grid sm:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label className="text-sm font-medium text-foreground block mb-1.5">Top results</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={topK}
+                      onChange={(e) => setTopK(Number(e.target.value))}
+                      className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                  <Button disabled={queryLoading} onClick={handleQuerySubmit}>
+                    {queryLoading ? "Testing..." : "Run embedding test"}
+                  </Button>
+                </div>
+                {queryError && <div className="text-sm text-destructive">{queryError}</div>}
+                {queryResults.length > 0 && (
+                  <div className="space-y-4">
+                    <h3 className="font-medium text-foreground">Top matching snippets</h3>
+                    <div className="space-y-3">
+                      {queryResults.map((result) => (
+                        <div key={result.index} className="p-4 rounded-lg bg-muted/30 border border-border/50">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-sm font-medium text-foreground">Chunk {result.index + 1}</span>
+                            <span className="text-xs text-muted-foreground">Score: {result.score.toFixed(3)}</span>
+                          </div>
+                          <p className="text-sm text-foreground leading-6">{result.chunk}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
