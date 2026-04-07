@@ -1,9 +1,51 @@
+import { useState } from "react";
 import { motion } from "framer-motion";
-import { Sparkles, User, Mail, Lock, Building, ArrowRight } from "lucide-react";
+import { Sparkles, User, Mail, Lock, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@/contexts/AuthContext";
 
 export default function RegisterPage() {
+  const navigate = useNavigate();
+  const { register, isLoading } = useAuth();
+  const [formData, setFormData] = useState({
+    full_name: "",
+    email: "",
+    username: "",
+    password: "",
+  });
+  const [error, setError] = useState("");
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setFormData((prev) => ({
+      ...prev,
+      [name]: value,
+    }));
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+
+    if (!formData.full_name || !formData.email || !formData.username || !formData.password) {
+      setError("All fields are required");
+      return;
+    }
+
+    try {
+      await register({
+        email: formData.email,
+        username: formData.username,
+        full_name: formData.full_name,
+        password: formData.password,
+      });
+      navigate("/dashboard");
+    } catch (err: any) {
+      setError(err.message || "Registration failed. Please try again.");
+    }
+  };
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-background relative overflow-hidden py-12">
       <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-primary/20 rounded-full blur-[120px]" />
@@ -15,63 +57,90 @@ export default function RegisterPage() {
             <div className="w-10 h-10 rounded-xl gradient-primary flex items-center justify-center">
               <Sparkles className="w-6 h-6 text-primary-foreground" />
             </div>
-            <span className="font-display font-bold text-2xl text-foreground">LeadIntel AI</span>
+            <span className="font-display font-bold text-2xl text-foreground">Spark Outreach</span>
           </div>
 
           <h1 className="text-xl font-display font-bold text-foreground text-center mb-2">Start Your Free Trial</h1>
-          <p className="text-center text-sm text-muted-foreground mb-6">14 days free. No credit card required.</p>
+          <p className="text-center text-sm text-muted-foreground mb-6">Begin your AI-powered outreach journey</p>
 
-          <div className="space-y-4">
-            <Button variant="outline" className="w-full h-11">
-              <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="" /> Continue with Google
-            </Button>
+          <form onSubmit={handleRegister} className="space-y-4">
+            {error && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-600 text-sm">
+                {error}
+              </div>
+            )}
 
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border" /></div>
-              <div className="relative flex justify-center"><span className="bg-card px-3 text-xs text-muted-foreground">or</span></div>
+            <div>
+              <label className="text-sm font-medium text-foreground block mb-1.5">Full Name</label>
+              <div className="relative">
+                <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type="text"
+                  name="full_name"
+                  placeholder="John Doe"
+                  value={formData.full_name}
+                  onChange={handleChange}
+                  className="w-full h-10 pl-9 pr-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-sm font-medium text-foreground block mb-1.5">Full Name</label>
-                <input placeholder="John Doe" className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-foreground block mb-1.5">Company</label>
-                <input placeholder="Acme Corp" className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
-              </div>
+            <div>
+              <label className="text-sm font-medium text-foreground block mb-1.5">Username</label>
+              <input
+                type="text"
+                name="username"
+                placeholder="johndoe"
+                value={formData.username}
+                onChange={handleChange}
+                className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                required
+              />
             </div>
 
             <div>
               <label className="text-sm font-medium text-foreground block mb-1.5">Email</label>
-              <input type="email" placeholder="john@company.com" className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type="email"
+                  name="email"
+                  placeholder="john@company.com"
+                  value={formData.email}
+                  onChange={handleChange}
+                  className="w-full h-10 pl-9 pr-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
             </div>
 
             <div>
               <label className="text-sm font-medium text-foreground block mb-1.5">Password</label>
-              <input type="password" placeholder="••••••••" className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary" />
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <input
+                  type="password"
+                  name="password"
+                  placeholder="••••••••"
+                  value={formData.password}
+                  onChange={handleChange}
+                  className="w-full h-10 pl-9 pr-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                  required
+                />
+              </div>
             </div>
 
-            <div>
-            <label className="text-sm font-medium text-foreground block mb-1.5">I am a...</label>
-              <select className="w-full h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary">
-                <option>Founder</option>
-                <option>Business Development</option>
-                <option>Sales Team</option>
-              </select>
-            </div>
-
-            <label className="flex items-start gap-2 text-sm text-muted-foreground">
-              <input type="checkbox" className="mt-1 accent-primary" />
-              I agree to the Terms of Service and Privacy Policy
-            </label>
-
-            <Link to="/dashboard">
-              <Button variant="gradient" className="w-full h-11">
-                Create Account <ArrowRight className="w-4 h-4" />
-              </Button>
-            </Link>
-          </div>
+            <Button
+              type="submit"
+              variant="gradient"
+              className="w-full h-11"
+              disabled={isLoading}
+            >
+              {isLoading ? "Creating account..." : "Create Account"}
+              <ArrowRight className="w-4 h-4" />
+            </Button>
+          </form>
 
           <p className="text-center text-sm text-muted-foreground mt-6">
             Already have an account?{" "}
