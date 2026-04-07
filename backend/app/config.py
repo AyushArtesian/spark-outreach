@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # OpenAI API (optional, for future use)
     OPENAI_API_KEY: Optional[str] = None
     
+    # Hugging Face Inference API (for embeddings)
+    HF_API_KEY: Optional[str] = None
+    
     # CORS
     CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]
     
