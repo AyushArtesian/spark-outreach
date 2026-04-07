@@ -15,6 +15,7 @@ import LeadDetail from "./pages/LeadDetail";
 import LeadSettings from "./pages/LeadSettings";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import CVInteractiveLab from "./pages/CVInteractiveLab";
 
 const queryClient = new QueryClient();
 
@@ -37,6 +38,7 @@ const App = () => (
               <Route path="/lead/:id" element={<LeadDetail />} />
               <Route path="/settings" element={<LeadSettings />} />
             </Route>
+            <Route path="/cv-lab" element={<CVInteractiveLab />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>
