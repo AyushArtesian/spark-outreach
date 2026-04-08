@@ -438,6 +438,46 @@ def _resolve_duckduckgo_url(raw_href: str) -> str:
     return href
 
 
+def _extract_company_name_from_html(soup: BeautifulSoup, title_text: str) -> str:
+    """Extract a better company name from metadata or prominent headers."""
+    title = (title_text or "").strip()
+    company_name = ""
+
+    def _clean(value: str) -> str:
+        return value.strip().split("|")[0].split("-")[0].strip()
+
+    if title:
+        company_name = _clean(title)
+
+    # Prefer explicit site name metadata when available.
+    for selector in (
+        "meta[property='og:site_name']",
+        "meta[property='og:title']",
+        "meta[name='twitter:title']",
+        "meta[name='twitter:site']",
+    ):
+        elem = soup.select_one(selector)
+        if elem and elem.get("content"):
+            candidate = _clean(elem.get("content", ""))
+            if candidate and candidate.lower() not in ("home", "home page"):
+                company_name = candidate
+                break
+
+    # Fallback to main heading if the title is too generic.
+    if company_name and re.search(r"\b(web|software|development|company|services|design|agency|it)\b", company_name.lower()):
+        heading = soup.find(["h1", "h2"])
+        if heading:
+            heading_text = _clean(heading.get_text(" ", strip=True))
+            if heading_text and heading_text.lower() not in ("home", "welcome", "services", "solutions", "about us"):
+                company_name = heading_text
+
+    # Final fallback: if extracted name is still generic, return empty so calling code can use domain.
+    if not company_name or len(company_name) < 3 or re.search(r"\b(web|software|development|company|services|agency)\b", company_name.lower()):
+        return ""
+
+    return company_name
+
+
 def _append_candidate_result(
     results: list,
     seen_domains: set,
@@ -570,9 +610,11 @@ async def fetch_company_profile_snapshot(url: str) -> Dict[str, str]:
             soup = BeautifulSoup(html, "html.parser")
 
             title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
-            if title:
-                name = title.split("|")[0].split("-")[0].strip()
+            name = _extract_company_name_from_html(soup, title)
+            if name:
                 result["company_name"] = name[:120]
+            elif title:
+                result["company_name"] = title.split("|")[0].split("-")[0].strip()[:120]
 
             text = soup.get_text(" ", strip=True)
             text = re.sub(r"\s+", " ", text)

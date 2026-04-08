@@ -12,9 +12,12 @@ interface Lead {
   id: string;
   name: string;
   email: string;
+  phone?: string;
   company?: string;
   job_title?: string;
   industry?: string;
+  source_url?: string;
+  company_summary?: string;
   company_fit_score: number;
   signal_score: number;
   signal_keywords: string[];
@@ -210,6 +213,11 @@ export default function LeadResults() {
                               {lead.job_title && <span>{lead.job_title}</span>}
                               {lead.industry && <span>{lead.industry}</span>}
                               {lead.created_at && <span>{new Date(lead.created_at).toLocaleDateString()}</span>}
+                            </div>
+                            <div className="mt-2 text-xs text-muted-foreground space-y-1">
+                              {lead.email && <div><span className="font-semibold text-foreground">Email:</span> {lead.email}</div>}
+                              {lead.phone && <div><span className="font-semibold text-foreground">Phone:</span> {lead.phone}</div>}
+                              {lead.source_url && <div><span className="font-semibold text-foreground">Website:</span> <a href={lead.source_url} target="_blank" rel="noreferrer" className="text-primary underline">Visit</a></div>}
                             </div>
                           </div>
                         </div>

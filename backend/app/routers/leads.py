@@ -28,9 +28,12 @@ class LeadSearchResult(BaseModel):
     id: str
     name: str
     email: str
+    phone: Optional[str] = None
     company: Optional[str]
     job_title: Optional[str]
     industry: Optional[str]
+    source_url: Optional[str] = None
+    company_summary: Optional[str] = None
     company_fit_score: float
     signal_score: float
     signal_keywords: List[str]
@@ -107,13 +110,17 @@ async def search_leads(
         # Format results
         search_results = []
         for lead in results:
+            lead_raw = lead.raw_data or {}
             search_results.append(LeadSearchResult(
                 id=str(lead.id),
                 name=lead.name,
                 email=lead.email,
+                phone=lead.phone,
                 company=lead.company,
                 job_title=lead.job_title,
                 industry=lead.industry,
+                source_url=lead_raw.get("source_url") or lead_raw.get("company_website"),
+                company_summary=lead_raw.get("company_summary"),
                 company_fit_score=lead.company_fit_score or 0.0,
                 signal_score=lead.signal_score or 0.0,
                 signal_keywords=lead.signal_keywords or [],

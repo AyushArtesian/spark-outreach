@@ -193,6 +193,7 @@ class LeadService:
 
             company_name = (item.get("name") or domain.split(".")[0].title()).strip()
             email = f"contact@{domain}"
+            phone = ""
             snippet = (item.get("snippet") or "").lower()
 
             snapshot = await fetch_company_profile_snapshot(item.get("url", ""))
@@ -200,6 +201,8 @@ class LeadService:
                 company_name = snapshot["company_name"]
             if snapshot.get("email"):
                 email = snapshot["email"]
+            if snapshot.get("phone"):
+                phone = snapshot["phone"]
 
             summary_text = (snapshot.get("summary") or "").lower()
             combined_quality_text = f"{company_name.lower()} {snippet} {summary_text}"
@@ -274,15 +277,17 @@ class LeadService:
 
             lead = Lead(
                 campaign_id=str(campaign.id),
-                name=f"{company_name} Team",
+                name=company_name,
                 email=email,
                 company=company_name,
+                phone=phone,
                 job_title="Hiring Team",
                 industry=industry if industry and str(industry).lower() != "all" else None,
                 status="new",
                 raw_data={
                     "source": "web_discovery",
                     "source_url": item.get("url", ""),
+                    "company_website": item.get("url", ""),
                     "snippet": item.get("snippet", ""),
                     "query": query,
                     "location": location,
