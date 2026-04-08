@@ -44,6 +44,24 @@ def _normalize_location_text(value: Optional[str]) -> str:
     return normalized
 
 
+def _clean_search_query_text(raw_query: str) -> str:
+    """Reduce verbose user query prompts into search-friendly keyword strings."""
+    text = (raw_query or "").strip().lower()
+    if not text:
+        return ""
+
+    # Remove common instruction phrases and filler terms that harm web search relevance.
+    text = re.sub(r"\b(find|search for|looking for|discover|show|find me)\b", "", text)
+    text = re.sub(r"\b(companies?|firms?|businesses?)\b", "", text)
+    text = re.sub(r"\b(in|located in|based in|near|around)\b", "", text)
+    text = re.sub(r"\b(that need|that require|needing|need|requires?)\b", "", text)
+    text = re.sub(r"\b(size|sizes|small|medium|large|all sizes|all industries)\b", "", text)
+    text = re.sub(r"\b(software services|company software|services b2b|b2b service)\b", "", text)
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _is_likely_noise_line(line: str) -> bool:
     """Filter nav/menu/footer heavy lines that pollute embeddings."""
     lower = line.lower()
@@ -625,27 +643,29 @@ async def discover_company_websites(
     if not query_text:
         return []
 
-    parts = [query_text]
+    cleaned_query = _clean_search_query_text(query_text)
+    normalized_location = _normalize_location_text(location)
+    parts = []
     if industry and str(industry).lower() != "all":
         parts.append(str(industry))
-    normalized_location = _normalize_location_text(location)
     if normalized_location:
         parts.append(normalized_location)
     if service_focus:
         parts.append(" ".join([str(s) for s in service_focus if s]))
     if target_locations:
         parts.append(" ".join([str(t) for t in target_locations[:3] if t]))
-    if context_keywords:
-        parts.append(" ".join([str(k) for k in context_keywords[:8] if k]))
-    parts.append("company software services b2b")
+    if cleaned_query:
+        parts.append(cleaned_query)
+    # Use a concise search phrase that emphasizes company software/service discovery.
+    parts.append("software development company b2b")
     search_query = _compact_query(parts, max_len=260)
     fallback_query = _compact_query([
         normalized_location or "",
         industry or "",
         " ".join([str(s) for s in (service_focus or [])[:3]]),
-        "software company services",
-        "india",
-    ], max_len=160)
+        cleaned_query,
+        "software development company b2b",
+    ], max_len=180)
 
     no_location_query = _compact_query([
         industry or "",

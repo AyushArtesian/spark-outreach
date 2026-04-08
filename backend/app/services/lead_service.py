@@ -6,6 +6,7 @@ from app.models.lead import Lead
 from app.models.company import CompanyProfile
 from app.schemas.lead import LeadCreate, LeadUpdate
 from app.utils.embeddings import embedding_service
+from app.services.web_scraper import _normalize_location_text
 from datetime import datetime
 from bson import ObjectId
 from urllib.parse import urlparse
@@ -242,8 +243,12 @@ class LeadService:
             has_snapshot = bool(snapshot.get("email") or snapshot.get("phone") or snapshot.get("summary"))
             min_quality = 0.45 if has_snapshot else 0.35
             if quality_score < min_quality:
-                skipped_low_quality += 1
-                continue
+                # Allow marginal leads when there is no snapshot, provided the source is not a known list/rank page.
+                if not has_snapshot and quality_score >= 0.22:
+                    pass
+                else:
+                    skipped_low_quality += 1
+                    continue
 
             # Basic relevance gate from service focus + company context keywords
             weighted_keywords = [
@@ -332,6 +337,7 @@ class LeadService:
                 str(lead_raw.get("source_url", "")),
             ]
         ).lower()
+        normalized_location = _normalize_location_text(location) if location else ""
 
         source_url = str(lead_raw.get("source_url", "")).lower()
         quality_score = float(lead_raw.get("discovery_quality_score", 0.0) or 0.0)
@@ -357,8 +363,9 @@ class LeadService:
         if industry and industry != "all" and industry not in searchable:
             return False
 
-        if location and location not in searchable:
-            return False
+        if location:
+            if location not in searchable and normalized_location and normalized_location not in searchable:
+                return False
 
         if services:
             service_tokens = []
