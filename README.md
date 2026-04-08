@@ -71,6 +71,61 @@ Spark Outreach discovers leads using search-engine results and website scraping,
 
 ---
 
+## Workflows
+
+### 1. Local development workflow
+
+1. Start the backend:
+   - `cd backend`
+   - `python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
+2. Start the frontend:
+   - `npm install`
+   - `npm run dev`
+3. Open the frontend in the browser at the Vite URL shown, usually `http://localhost:5173`.
+4. Confirm the backend is reachable and `POST /api/v1/auth/login` works.
+
+### 2. Company setup workflow
+
+1. Register or log in via the frontend.
+2. Open `Company Setup` and complete the profile:
+   - Services
+   - Expertise areas
+   - Technologies
+   - Target industries
+   - Target locations
+3. Save the profile.
+4. Generate company embeddings through the company profile flow or backend endpoint.
+5. Validate embeddings in `Settings > Embedding Test`.
+
+### 3. Lead discovery workflow
+
+1. Create a campaign or use the default auto-discovery campaign.
+2. Open `Lead Search`.
+3. Enter your search query and apply filters such as `location`, `industry`, and `services`.
+4. Run the search. The backend will:
+   - generate targeted provider-focused queries
+   - use SerpAPI to fetch candidate URLs
+   - filter low-value domains and noise pages
+   - scrape website content and metadata
+   - enrich leads with embeddings, company fit, and signal scores
+5. Review results in the UI.
+
+### 4. Lead scoring and review workflow
+
+1. Use lead scores and reasons to prioritize results.
+2. Review candidate details, including summary, email, phone, and detected signals.
+3. Mark leads as `contacted`, `replied`, `converted`, or `rejected`.
+4. Use campaign status and lead status to manage outreach progress.
+
+### 5. Outreach workflow
+
+1. Select top leads from search results.
+2. Use the AI message generation endpoint or frontend workflow to create outreach copy.
+3. Send messages or mark leads as contacted.
+4. Track lead engagement status in the lead dashboard.
+
+---
+
 ## Setup Instructions
 
 ### Backend
