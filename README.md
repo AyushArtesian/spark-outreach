@@ -71,7 +71,142 @@ Spark Outreach discovers leads using search-engine results and website scraping,
 
 ---
 
+## System Flow
+
+This system implements a multi-stage lead intelligence pipeline: user input is converted into context, market data is collected, signals are detected, leads are matched and scored, results are stored, and user feedback closes the loop.
+
+### 1. User Input
+
+- The user provides company profile data, service preferences, industry, location, and search queries.
+- Input sources include Company Setup, Lead Search, and Campaign configuration pages.
+- The frontend sends these inputs to backend API routes.
+
+### 2. Context Processing Engine
+
+- The backend builds a semantic profile from company settings and search filters.
+- `company_service.py` normalizes services, expertise, technologies, industries, and locations.
+- `ai_service.py` generates embeddings for the company profile and query context.
+- This creates the intelligence profile used for matching.
+
+### 3. Intelligence Profile Creation
+
+- The intelligence profile is the combined fingerprint of:
+  - company service offerings
+  - technical expertise
+  - target industries and markets
+  - location focus
+  - project and product patterns
+- Profile data is stored with the `CompanyProfile` model and persisted in MongoDB.
+
+### 4. Market Data Collection
+
+- The scraper engine (`web_scraper.py`) uses provider-focused search queries to collect candidate companies.
+- It calls SerpAPI to retrieve search results and candidate URLs.
+- Each URL is filtered, deduped, and scored for discovery quality.
+- The scraper fetches website content, key pages, metadata, and contact signals.
+
+### 5. Signal Detection Engine
+
+- The scraper and lead service analyze page content for signals such as:
+  - hiring and open roles
+  - rapid scaling and growth language
+  - SaaS/product/platform indicators
+  - technical stack and engineering signals
+  - funding announcements
+- Signals are stored with each lead to support scoring and filtering.
+
+### 6. Matching Engine
+
+- The matching engine compares discovered leads against the intelligence profile.
+- It uses embedding similarity between company profile embeddings and lead embeddings.
+- It also validates industry, services, and location alignment.
+- This stage prioritizes actual provider matches over generic search results.
+
+### 7. Lead Scoring Engine
+
+- The scoring engine computes the final lead score using:
+  - company profile fit
+  - query relevance
+  - signal strength
+  - location match
+- Leads are ranked and annotated with reasons for why they were selected.
+
+### 8. Leads Database
+
+- Qualified leads are persisted in MongoDB as `Lead` documents.
+- Stored fields include raw discovery metadata, enriched embeddings, scores, signals, and status.
+- The database becomes the source of truth for future searches and campaign actions.
+
+### 9. Dashboard UI
+
+- The frontend displays leads with score, reason, company, email, phone, and industry data.
+- Users can filter, review, and prioritize leads from the dashboard.
+- Campaign and lead status actions update the backend state.
+
+### 10. User Outreach & Feedback Loop
+
+- Users select leads for outreach and update lead status when contacted or converted.
+- Feedback from outreach (contacted/replied/rejected) is stored and used to refine future discovery.
+- Profile updates, campaign changes, and lead outcomes feed back into the intelligence profile.
+
+---
+
 ## Workflows
+
+### 1. Local development workflow
+
+1. Start the backend:
+   - `cd backend`
+   - `python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
+2. Start the frontend:
+   - `npm install`
+   - `npm run dev`
+3. Open the frontend in the browser at the Vite URL shown, usually `http://localhost:5173`.
+4. Confirm the backend is reachable and `POST /api/v1/auth/login` works.
+
+### 2. Company setup workflow
+
+1. Register or log in via the frontend.
+2. Open `Company Setup` and complete the profile:
+   - Services
+   - Expertise areas
+   - Technologies
+   - Target industries
+   - Target locations
+3. Save the profile.
+4. Generate company embeddings through the company profile flow or backend endpoint.
+5. Validate embeddings in `Settings > Embedding Test`.
+
+### 3. Lead discovery workflow
+
+1. Create a campaign or use the default auto-discovery campaign.
+2. Open `Lead Search`.
+3. Enter your search query and apply filters such as `location`, `industry`, and `services`.
+4. Run the search. The backend will:
+   - generate provider-focused discovery queries
+   - call SerpAPI for candidate URLs
+   - filter low-value domains and noise pages
+   - scrape website content and metadata
+   - enrich leads with embeddings, company fit, and signal scores
+5. Review results in the UI.
+
+### 4. Lead scoring and review workflow
+
+1. Use lead scores and reasons to prioritize results.
+2. Review candidate details, including summary, email, phone, and detected signals.
+3. Mark leads as `contacted`, `replied`, `converted`, or `rejected`.
+4. Use campaign status and lead status to manage outreach progress.
+
+### 5. Outreach workflow
+
+1. Select top leads from search results.
+2. Use AI message generation or manual messaging for outreach.
+3. Mark leads as contacted and track responses.
+4. Update lead status based on feedback to improve future search quality.
+
+---
+
+## Setup Instructions
 
 ### 1. Local development workflow
 
