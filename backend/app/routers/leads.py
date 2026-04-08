@@ -2,7 +2,7 @@
 Leads router
 """
 from fastapi import APIRouter, HTTPException, status, Header
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from app.models.lead import Lead
 from app.models.user import User
@@ -12,8 +12,30 @@ from app.services.lead_service import lead_service
 from app.services.ai_service import ai_service
 from app.utils.auth import decode_token
 from app.utils.response import serialize_lead
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/leads", tags=["leads"])
+
+# Request/Response models for search
+class LeadSearchRequest(BaseModel):
+    query: str
+    campaign_id: Optional[str] = None
+    filters: Optional[Dict[str, Any]] = None
+    top_k: int = 20
+    sort_by: str = "combined"  # combined, fit_score, signal_score, created_at
+
+class LeadSearchResult(BaseModel):
+    id: str
+    name: str
+    email: str
+    company: Optional[str]
+    job_title: Optional[str]
+    industry: Optional[str]
+    company_fit_score: float
+    signal_score: float
+    signal_keywords: List[str]
+    status: str
+    created_at: str
 
 # Helper to get current user from JWT token
 def get_current_user_from_token(authorization: Optional[str] = Header(None)) -> User:
@@ -50,12 +72,71 @@ def get_current_user_from_token(authorization: Optional[str] = Header(None)) -> 
     
     return user
 
+@router.post("/search", response_model=List[LeadSearchResult])
+async def search_leads(
+    search_request: LeadSearchRequest,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Search leads using company fit scoring, growth signals, and query relevance
+    
+    Query examples:
+    - "Find companies hiring in tech that need .NET development"
+    - "Find SaaS companies in Series A funding stage"
+    - "Find eCommerce companies using outdated tech"
+    
+    sort_by options:
+    - combined: (50% company fit + 30% signals + 20% query match)
+    - fit_score: company profile alignment
+    - signal_score: hiring/funding/growth signals
+    - created_at: newest leads first
+    """
+    current_user = get_current_user_from_token(authorization)
+    
+    try:
+        # Search leads using company fit and signals
+        results = await lead_service.search_leads_by_company_fit(
+            owner_id=str(current_user.id),
+            query=search_request.query,
+            campaign_id=search_request.campaign_id,
+            filters=search_request.filters,
+            top_k=search_request.top_k,
+            sort_by=search_request.sort_by
+        )
+        
+        # Format results
+        search_results = []
+        for lead in results:
+            search_results.append(LeadSearchResult(
+                id=str(lead.id),
+                name=lead.name,
+                email=lead.email,
+                company=lead.company,
+                job_title=lead.job_title,
+                industry=lead.industry,
+                company_fit_score=lead.company_fit_score or 0.0,
+                signal_score=lead.signal_score or 0.0,
+                signal_keywords=lead.signal_keywords or [],
+                status=lead.status,
+                created_at=lead.created_at.isoformat() if lead.created_at else ""
+            ))
+        
+        return search_results
+    except Exception as e:
+        print(f"Error searching leads: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search leads: {str(e)}"
+        )
+
 @router.post("", response_model=LeadResponse)
 async def create_lead(
     lead: LeadCreate,
     authorization: Optional[str] = Header(None)
 ):
     """Create a new lead"""
+    from app.models.company import CompanyProfile
+    
     current_user = get_current_user_from_token(authorization)
     
     campaign = Campaign.objects(id=lead.campaign_id).first()
@@ -66,6 +147,11 @@ async def create_lead(
         )
     
     db_lead = lead_service.create_lead(lead)
+    
+    # Enrich lead with embeddings and signals
+    company_profile = CompanyProfile.objects(owner_id=current_user.id).first()
+    if company_profile:
+        db_lead = await lead_service.enrich_lead_profile(db_lead, company_profile)
     
     # Calculate relevance score
     relevance_score = await ai_service.analyze_lead_relevance(db_lead, campaign)
@@ -80,6 +166,8 @@ async def create_bulk_leads(
     authorization: Optional[str] = Header(None)
 ):
     """Create multiple leads at once"""
+    from app.models.company import CompanyProfile
+    
     current_user = get_current_user_from_token(authorization)
     
     campaign = Campaign.objects(id=bulk_leads.campaign_id).first()
@@ -91,8 +179,16 @@ async def create_bulk_leads(
     
     db_leads = lead_service.create_bulk_leads(bulk_leads.leads)
     
-    # Calculate relevance scores for all leads
+    # Get company profile for enrichment
+    company_profile = CompanyProfile.objects(owner_id=current_user.id).first()
+    
+    # Enrich and score all leads
     for db_lead in db_leads:
+        # Enrich lead with embeddings and signals
+        if company_profile:
+            db_lead = await lead_service.enrich_lead_profile(db_lead, company_profile)
+        
+        # Calculate relevance score
         relevance_score = await ai_service.analyze_lead_relevance(db_lead, campaign)
         db_lead.relevance_score = relevance_score
         db_lead.save()

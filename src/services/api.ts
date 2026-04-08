@@ -183,6 +183,20 @@ export const leadsAPI = {
       requiresAuth: true,
     });
   },
+
+  search: async (data: {
+    query: string;
+    campaign_id?: string;
+    filters?: Record<string, any>;
+    top_k?: number;
+    sort_by?: string;
+  }) => {
+    return apiCall("/leads/search", {
+      method: "POST",
+      body: JSON.stringify(data),
+      requiresAuth: true,
+    });
+  },
 };
 
 // AI API

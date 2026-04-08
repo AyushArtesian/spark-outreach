@@ -3,7 +3,7 @@
 import asyncio
 import re
 from typing import Dict, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote_plus, parse_qs, unquote
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -14,6 +14,15 @@ MAX_PAGE_CHARS = 15000      # 15KB per page - get full page content
 MAX_INTERNAL_PAGES = 25     # Crawl up to 25 pages for complete coverage
 
 
+LOCATION_ALIASES = {
+    "gurgoan": "gurgaon",
+    "gurugram": "gurgaon",
+    "banglore": "bangalore",
+    "bengalure": "bangalore",
+    "new delhi": "delhi",
+}
+
+
 def _normalize_url(url: str) -> str:
     """Ensure URLs are absolute and normalized."""
     normalized = (url or "").strip()
@@ -21,6 +30,17 @@ def _normalize_url(url: str) -> str:
         return ""
     if not normalized.startswith(("http://", "https://")):
         normalized = f"https://{normalized}"
+    return normalized
+
+
+def _normalize_location_text(value: Optional[str]) -> str:
+    """Normalize frequent city spelling variants for better search hit-rate."""
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    normalized = text
+    for src, dst in LOCATION_ALIASES.items():
+        normalized = normalized.replace(src, dst)
     return normalized
 
 
@@ -115,15 +135,21 @@ async def _fetch_html(
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate",
                 "Cache-Control": "no-cache",
                 "Pragma": "no-cache",
+                "Referer": "https://www.google.com/",
             },
             allow_redirects=True,
         ) as response:
-            if response.status != 200:
+            if response.status < 200 or response.status >= 300:
                 print(f"Failed to fetch {normalized}: Status {response.status}")
                 return None
-            return await response.text()
+            try:
+                return await response.text(errors="ignore")
+            except Exception:
+                raw = await response.read()
+                return raw.decode("utf-8", errors="ignore")
     except Exception as e:
         print(f"Error fetching {normalized}: {e}")
         return None
@@ -378,3 +404,392 @@ def combine_portfolio_content(portfolio_content: Dict[str, str]) -> str:
         if content:
             combined.append(f"[{source.upper()}]\n{content}\n")
     return "\n".join(combined)
+
+
+def _resolve_duckduckgo_url(raw_href: str) -> str:
+    """Resolve DuckDuckGo redirect links to their target URL."""
+    href = (raw_href or "").strip()
+    if not href:
+        return ""
+    parsed = urlparse(href)
+    if "duckduckgo.com" in parsed.netloc and parsed.path.startswith("/l/"):
+        params = parse_qs(parsed.query)
+        uddg = params.get("uddg", [])
+        if uddg:
+            return unquote(uddg[0])
+    return href
+
+
+def _append_candidate_result(
+    results: list,
+    seen_domains: set,
+    href: str,
+    title: str,
+    snippet: str,
+    blocked_domains: set,
+) -> bool:
+    """Validate and append candidate result while deduping by domain."""
+    if not href.startswith(("http://", "https://")):
+        return False
+
+    parsed = urlparse(href)
+    domain = (parsed.netloc or "").lower().replace("www.", "")
+    path = (parsed.path or "").lower()
+    title_lower = (title or "").lower()
+    snippet_lower = (snippet or "").lower()
+
+    low_value_domain_tokens = {
+        "crunchbase",
+        "tracxn",
+        "g2",
+        "clutch",
+        "goodfirms",
+        "sortlist",
+        "designrush",
+        "upcity",
+        "wikipedia",
+        "yelp",
+        "justdial",
+        "glassdoor",
+        "indeed",
+        "naukri",
+        "monster",
+        "forbes",
+        "techcrunch",
+        "businessinsider",
+        "yourstory",
+        "inc42",
+        "wikipedia",
+        "infinityjobs",
+        "timesjobs",
+        "naukri",
+        "indeed",
+        "monster",
+        "apna",
+        "shine",
+        "freshersworld",
+        "glassdoor",
+    }
+    low_value_text_tokens = {
+        "top 100",
+        "top 50",
+        "top 10",
+        "list of",
+        "best companies",
+        "best company",
+        "to work for",
+        "jobs in",
+        "job openings",
+        "salary",
+        "compare",
+        "rankings",
+        "directory",
+        "opening",
+        "vacancy",
+        "career",
+    }
+
+    if not domain:
+        return False
+    if any(token in domain for token in low_value_domain_tokens):
+        return False
+    if any(domain == d or domain.endswith(f".{d}") for d in blocked_domains):
+        return False
+    if any(token in title_lower for token in low_value_text_tokens):
+        return False
+    if any(token in snippet_lower for token in low_value_text_tokens):
+        return False
+    if any(token in path for token in ["/list", "/top", "/best", "/jobs", "/rank", "/compare"]):
+        return False
+    if any(token in path for token in ["/career", "/careers", "/vacancies", "/job", "/hiring"]):
+        return False
+    if " job" in title_lower or "jobs" in title_lower:
+        return False
+    if re.search(r"\b(20\d{2}|top\s*\d+)\b", title_lower):
+        return False
+    if re.match(r"^\d+\s+", title_lower):
+        return False
+    if domain in seen_domains:
+        return False
+
+    company_name = (title or "").split("|")[0].split("-")[0].strip() or domain.split(".")[0].title()
+    canonical_url = f"https://{domain}"
+    seen_domains.add(domain)
+    results.append(
+        {
+            "name": company_name[:120],
+            "url": canonical_url,
+            "domain": domain,
+            "snippet": (snippet or "")[:300],
+        }
+    )
+    return True
+
+
+async def fetch_company_profile_snapshot(url: str) -> Dict[str, str]:
+    """Fetch lightweight company profile details from homepage (name/contact hints)."""
+    normalized = _normalize_url(url)
+    if not normalized:
+        return {}
+
+    parsed = urlparse(normalized)
+    base_url = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+
+    result: Dict[str, str] = {
+        "website": base_url,
+        "company_name": "",
+        "email": "",
+        "phone": "",
+        "summary": "",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            html = await _fetch_html(base_url, session, timeout=12)
+            if not html:
+                return result
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
+            if title:
+                name = title.split("|")[0].split("-")[0].strip()
+                result["company_name"] = name[:120]
+
+            text = soup.get_text(" ", strip=True)
+            text = re.sub(r"\s+", " ", text)
+            result["summary"] = text[:400]
+
+            # Prefer explicit mailto links first
+            emails = []
+            for anchor in soup.find_all("a", href=True):
+                href = anchor.get("href", "")
+                if href.startswith("mailto:"):
+                    candidate = href.replace("mailto:", "").split("?")[0].strip()
+                    if candidate:
+                        emails.append(candidate)
+
+            if not emails:
+                emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+
+            valid_emails = []
+            for email in emails:
+                e = email.lower().strip()
+                if any(bad in e for bad in ["noreply", "no-reply", "example.com", "sentry", "wixpress"]):
+                    continue
+                valid_emails.append(e)
+
+            if valid_emails:
+                result["email"] = valid_emails[0]
+
+            phones = re.findall(r"(?:\+?\d[\d\-\s()]{8,}\d)", text)
+            if phones:
+                result["phone"] = phones[0][:32]
+    except Exception as e:
+        print(f"Error fetching company profile snapshot from {base_url}: {e}")
+
+    return result
+
+
+def _compact_query(parts: list, max_len: int = 260) -> str:
+    """Compact query text to avoid anti-bot/rate-limit triggers on very long URLs."""
+    tokens = []
+    seen = set()
+    for part in parts:
+        for token in str(part).split():
+            normalized = token.strip().lower()
+            if not normalized:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            tokens.append(token.strip())
+
+    query = " ".join(tokens)
+    if len(query) <= max_len:
+        return query
+    return query[:max_len].rsplit(" ", 1)[0]
+
+
+async def discover_company_websites(
+    query: str,
+    location: Optional[str] = None,
+    industry: Optional[str] = None,
+    service_focus: Optional[list] = None,
+    target_locations: Optional[list] = None,
+    context_keywords: Optional[list] = None,
+    max_results: int = 20,
+) -> list:
+    """Discover candidate company websites from public search results."""
+    query_text = (query or "").strip()
+    if not query_text:
+        return []
+
+    parts = [query_text]
+    if industry and str(industry).lower() != "all":
+        parts.append(str(industry))
+    normalized_location = _normalize_location_text(location)
+    if normalized_location:
+        parts.append(normalized_location)
+    if service_focus:
+        parts.append(" ".join([str(s) for s in service_focus if s]))
+    if target_locations:
+        parts.append(" ".join([str(t) for t in target_locations[:3] if t]))
+    if context_keywords:
+        parts.append(" ".join([str(k) for k in context_keywords[:8] if k]))
+    parts.append("company software services b2b")
+    search_query = _compact_query(parts, max_len=260)
+    fallback_query = _compact_query([
+        normalized_location or "",
+        industry or "",
+        " ".join([str(s) for s in (service_focus or [])[:3]]),
+        "software company services",
+        "india",
+    ], max_len=160)
+
+    no_location_query = _compact_query([
+        industry or "",
+        " ".join([str(s) for s in (service_focus or [])[:3]]),
+        "software development company b2b",
+        "india",
+    ], max_len=160)
+
+    ddg_search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(search_query)}"
+    bing_search_url = f"https://www.bing.com/search?q={quote_plus(search_query)}"
+    bing_fallback_url = f"https://www.bing.com/search?q={quote_plus(fallback_query)}"
+    bing_no_location_url = f"https://www.bing.com/search?q={quote_plus(no_location_query)}"
+    blocked_domains = {
+        "duckduckgo.com",
+        "bing.com",
+        "linkedin.com",
+        "facebook.com",
+        "instagram.com",
+        "x.com",
+        "twitter.com",
+        "youtube.com",
+        "wikipedia.org",
+        "reddit.com",
+        "github.com",
+    }
+
+    results = []
+    seen_domains = set()
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Primary source: DuckDuckGo HTML
+            ddg_html = await _fetch_html(ddg_search_url, session, timeout=15)
+            if ddg_html:
+                soup = BeautifulSoup(ddg_html, "html.parser")
+                for anchor in soup.select("a.result__a"):
+                    href = _resolve_duckduckgo_url(anchor.get("href", ""))
+                    title = anchor.get_text(" ", strip=True)
+
+                    snippet = ""
+                    block = anchor.find_parent("div", class_="result")
+                    if block:
+                        snippet_node = block.select_one("a.result__snippet, div.result__snippet")
+                        if snippet_node:
+                            snippet = snippet_node.get_text(" ", strip=True)
+
+                    _append_candidate_result(
+                        results=results,
+                        seen_domains=seen_domains,
+                        href=href,
+                        title=title,
+                        snippet=snippet,
+                        blocked_domains=blocked_domains,
+                    )
+
+                    if len(results) >= max_results:
+                        break
+
+            # Fallback source: Bing HTML (used when DDG is sparse or blocked)
+            if len(results) < max_results:
+                bing_html = await _fetch_html(bing_search_url, session, timeout=15)
+                if bing_html:
+                    soup = BeautifulSoup(bing_html, "html.parser")
+                    for item in soup.select("li.b_algo"):
+                        anchor = item.select_one("h2 a")
+                        if not anchor:
+                            continue
+
+                        href = (anchor.get("href") or "").strip()
+                        title = anchor.get_text(" ", strip=True)
+                        snippet_node = item.select_one(".b_caption p")
+                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+
+                        _append_candidate_result(
+                            results=results,
+                            seen_domains=seen_domains,
+                            href=href,
+                            title=title,
+                            snippet=snippet,
+                            blocked_domains=blocked_domains,
+                        )
+
+                        if len(results) >= max_results:
+                            break
+
+            # Secondary Bing pass with shorter query if still sparse
+            if len(results) < max_results:
+                bing_html = await _fetch_html(bing_fallback_url, session, timeout=15)
+                if bing_html:
+                    soup = BeautifulSoup(bing_html, "html.parser")
+
+                    # First try standard Bing result cards
+                    for item in soup.select("li.b_algo, .b_algo"):
+                        anchor = item.select_one("h2 a") or item.select_one("a[href]")
+                        if not anchor:
+                            continue
+
+                        href = (anchor.get("href") or "").strip()
+                        title = anchor.get_text(" ", strip=True)
+                        snippet_node = item.select_one(".b_caption p, p")
+                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+
+                        _append_candidate_result(
+                            results=results,
+                            seen_domains=seen_domains,
+                            href=href,
+                            title=title,
+                            snippet=snippet,
+                            blocked_domains=blocked_domains,
+                        )
+
+                        if len(results) >= max_results:
+                            break
+
+            # Third pass: remove location to recover from sparse city spelling/network indexing issues
+            if len(results) < max_results:
+                bing_html = await _fetch_html(bing_no_location_url, session, timeout=15)
+                if bing_html:
+                    soup = BeautifulSoup(bing_html, "html.parser")
+                    for item in soup.select("li.b_algo, .b_algo"):
+                        anchor = item.select_one("h2 a") or item.select_one("a[href]")
+                        if not anchor:
+                            continue
+
+                        href = (anchor.get("href") or "").strip()
+                        title = anchor.get_text(" ", strip=True)
+                        snippet_node = item.select_one(".b_caption p, p")
+                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+
+                        _append_candidate_result(
+                            results=results,
+                            seen_domains=seen_domains,
+                            href=href,
+                            title=title,
+                            snippet=snippet,
+                            blocked_domains=blocked_domains,
+                        )
+
+                        if len(results) >= max_results:
+                            break
+
+            print(f"Discovery results: query='{search_query}' total={len(results)}")
+    except Exception as e:
+        print(f"Error discovering company websites: {e}")
+        return []
+
+    return results

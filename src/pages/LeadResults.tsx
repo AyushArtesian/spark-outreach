@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Search, Star, MapPin, ExternalLink, Mail, Check, Filter, ArrowUpDown, Copy, Eye, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,56 +8,19 @@ import { Badge } from "@/components/ui/badge";
 import { Link } from "react-router-dom";
 import { toast } from "@/hooks/use-toast";
 
-const leads = [
-  {
-    id: 1, company: "TechVault Inc.", location: "San Francisco, CA", industry: "SaaS", size: "51-200",
-    score: 9.4, priority: "High", status: "New",
-    reasons: ["Hiring 5 backend engineers — matches your Node.js + Python expertise", "Recently raised Series B ($18M)", "Posted RFP for cloud migration project"],
-    email: "john@techvault.io",
-  },
-  {
-    id: 2, company: "NovaPay Systems", location: "New York, NY", industry: "FinTech", size: "200-1000",
-    score: 8.9, priority: "High", status: "New",
-    reasons: ["Expanding engineering team — 12 open roles", "Similar to your NovaPay past project", "Active LinkedIn posts about scaling challenges"],
-    email: "hiring@novapay.com",
-  },
-  {
-    id: 3, company: "GreenLeaf Health", location: "Austin, TX", industry: "Healthcare", size: "51-200",
-    score: 8.2, priority: "High", status: "Contacted",
-    reasons: ["Needs cloud migration — matches your GreenLeaf Health case study", "Budget approved for Q1 tech upgrade", "CTO active on LinkedIn"],
-    email: "cto@greenleafhealth.com",
-  },
-  {
-    id: 4, company: "DataStream AI", location: "London, UK", industry: "SaaS", size: "11-50",
-    score: 7.8, priority: "Medium", status: "New",
-    reasons: ["Posted RFP for ML pipeline development", "Using React + Python stack — direct match", "Growing 40% YoY"],
-    email: "founders@datastream.ai",
-  },
-  {
-    id: 5, company: "ShopFlow Commerce", location: "San Francisco, CA", industry: "E-commerce", size: "51-200",
-    score: 7.5, priority: "Medium", status: "New",
-    reasons: ["Hiring full-stack developers", "Mentioned need for mobile app in recent interview", "Previous client referral connection"],
-    email: "dev@shopflow.com",
-  },
-  {
-    id: 6, company: "EduBridge Platform", location: "Boston, MA", industry: "EdTech", size: "11-50",
-    score: 7.1, priority: "Medium", status: "New",
-    reasons: ["Looking for UI/UX redesign partner", "Seed stage — fast decision making", "Tech blog mentions scaling pain points"],
-    email: "hello@edubridge.io",
-  },
-  {
-    id: 7, company: "UrbanNest Realty", location: "Austin, TX", industry: "Real Estate", size: "11-50",
-    score: 6.4, priority: "Low", status: "New",
-    reasons: ["Wants to build property management platform", "Small budget but high growth potential"],
-    email: "info@urbannest.com",
-  },
-  {
-    id: 8, company: "CloudServe Solutions", location: "Seattle, WA", industry: "SaaS", size: "200-1000",
-    score: 6.1, priority: "Low", status: "Contacted",
-    reasons: ["DevOps consulting need identified", "Long sales cycle expected"],
-    email: "partnerships@cloudserve.io",
-  },
-];
+interface Lead {
+  id: string;
+  name: string;
+  email: string;
+  company?: string;
+  job_title?: string;
+  industry?: string;
+  company_fit_score: number;
+  signal_score: number;
+  signal_keywords: string[];
+  status: string;
+  created_at: string;
+}
 
 const priorityConfig: Record<string, { color: string; emoji: string }> = {
   High: { color: "bg-warning/10 text-warning border-warning/20", emoji: "🔥" },
@@ -74,22 +37,80 @@ const container = { hidden: {}, show: { transition: { staggerChildren: 0.05 } } 
 const item = { hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0 } };
 
 export default function LeadResults() {
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [search, setSearch] = useState("");
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
   const [sortBy, setSortBy] = useState("score");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Load search results from localStorage
+    const results = localStorage.getItem("searchResults");
+    if (results) {
+      try {
+        const parsedResults = JSON.parse(results);
+        // Convert API results to Lead format with priority calculation
+        const leadsWithPriority = parsedResults.map((lead: any) => ({
+          ...lead,
+          // Calculate priority based on combined fit + signal score
+          priority: calculatePriority(lead.company_fit_score, lead.signal_score),
+        }));
+        setLeads(leadsWithPriority);
+      } catch (error) {
+        console.error("Error parsing search results:", error);
+        setLeads([]);
+      }
+    }
+    setLoading(false);
+  }, []);
+
+  const calculatePriority = (fitScore: number, signalScore: number): string => {
+    const combinedScore = fitScore * 0.5 + signalScore * 0.3;
+    if (combinedScore >= 0.75) return "High";
+    if (combinedScore >= 0.5) return "Medium";
+    return "Low";
+  };
 
   let filtered = leads.filter((l) => {
-    if (search && !l.company.toLowerCase().includes(search.toLowerCase())) return false;
-    if (filterPriority !== "All" && l.priority !== filterPriority) return false;
+    if (search && !l.company?.toLowerCase().includes(search.toLowerCase())) return false;
+    const priority = calculatePriority(l.company_fit_score, l.signal_score);
+    if (filterPriority !== "All" && priority !== filterPriority) return false;
     if (filterStatus !== "All" && l.status !== filterStatus) return false;
     return true;
   });
 
-  if (sortBy === "score") filtered.sort((a, b) => b.score - a.score);
-  if (sortBy === "company") filtered.sort((a, b) => a.company.localeCompare(b.company));
+  if (sortBy === "score") {
+    filtered.sort((a, b) => {
+      const scoreA = a.company_fit_score * 0.5 + a.signal_score * 0.3;
+      const scoreB = b.company_fit_score * 0.5 + b.signal_score * 0.3;
+      return scoreB - scoreA;
+    });
+  }
+  if (sortBy === "company") {
+    filtered.sort((a, b) => (a.company || "").localeCompare(b.company || ""));
+  }
 
-  const highCount = leads.filter((l) => l.priority === "High").length;
+  const highCount = leads.filter((l) => calculatePriority(l.company_fit_score, l.signal_score) === "High").length;
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast({
+      title: "Copied!",
+      description: "Email copied to clipboard",
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-center">
+          <div className="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin mx-auto mb-4"></div>
+          <p className="text-muted-foreground">Loading search results...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -150,89 +171,113 @@ export default function LeadResults() {
 
       {/* Leads Grid */}
       <motion.div variants={container} initial="hidden" animate="show" className="grid gap-4">
-        {filtered.map((lead) => (
-          <motion.div key={lead.id} variants={item}>
-            <Card className={`border-border/50 shadow-sm hover:shadow-md transition-all hover:border-primary/20 ${lead.priority === "High" ? "ring-1 ring-warning/10" : ""}`}>
-              <CardContent className="p-5">
-                <div className="flex flex-col lg:flex-row gap-4">
-                  {/* Left — Company Info */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-start gap-3">
-                      <div className="w-11 h-11 rounded-xl bg-muted flex items-center justify-center text-sm font-bold text-foreground shrink-0">
-                        {lead.company.charAt(0)}
+        {filtered.length === 0 ? (
+          <Card className="border-border/50 shadow-sm">
+            <CardContent className="p-8 text-center">
+              <p className="text-muted-foreground">No leads found matching your filters</p>
+            </CardContent>
+          </Card>
+        ) : (
+          filtered.map((lead) => {
+            const priority = calculatePriority(lead.company_fit_score, lead.signal_score);
+            const combinedScore = lead.company_fit_score * 0.5 + lead.signal_score * 0.3;
+            const scoreOut10 = Math.round(combinedScore * 10);
+
+            return (
+              <motion.div key={lead.id} variants={item}>
+                <Card className={`border-border/50 shadow-sm hover:shadow-md transition-all hover:border-primary/20 ${priority === "High" ? "ring-1 ring-warning/10" : ""}`}>
+                  <CardContent className="p-5">
+                    <div className="flex flex-col lg:flex-row gap-4">
+                      {/* Left — Company Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start gap-3">
+                          <div className="w-11 h-11 rounded-xl bg-muted flex items-center justify-center text-sm font-bold text-foreground shrink-0">
+                            {lead.company?.charAt(0) || "?"}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Link to={`/lead/${lead.id}`} className="font-semibold text-foreground hover:text-primary transition-colors">
+                                {lead.company || "Unknown Company"}
+                              </Link>
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${priorityConfig[priority].color}`}>
+                                {priorityConfig[priority].emoji} {priority}
+                              </span>
+                              <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusConfig[lead.status] || "bg-muted/10 text-muted-foreground"}`}>
+                                {lead.status}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground flex-wrap">
+                              {lead.job_title && <span>{lead.job_title}</span>}
+                              {lead.industry && <span>{lead.industry}</span>}
+                              {lead.created_at && <span>{new Date(lead.created_at).toLocaleDateString()}</span>}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Signals */}
+                        <div className="mt-3 ml-14">
+                          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Signals</p>
+                          {lead.signal_keywords && lead.signal_keywords.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {lead.signal_keywords.map((keyword, i) => (
+                                <Badge key={i} variant="secondary" className="text-xs">
+                                  {keyword}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-sm text-muted-foreground">No signals detected</p>
+                          )}
+                        </div>
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Link to={`/lead/${lead.id}`} className="font-semibold text-foreground hover:text-primary transition-colors">
-                            {lead.company}
+
+                      {/* Right — Score + Actions */}
+                      <div className="flex lg:flex-col items-center lg:items-end gap-3 lg:gap-2 shrink-0 lg:min-w-[160px]">
+                        <div className="text-center lg:text-right">
+                          <div className="text-3xl font-display font-bold text-primary">{scoreOut10}</div>
+                          <div className="text-xs text-muted-foreground">/ 10</div>
+                          <div className="mt-2 space-y-0.5 text-xs">
+                            <div className="flex justify-end gap-2">
+                              <span className="text-muted-foreground">Fit:</span>
+                              <span className="font-semibold text-foreground">{(lead.company_fit_score * 100).toFixed(0)}%</span>
+                            </div>
+                            <div className="flex justify-end gap-2">
+                              <span className="text-muted-foreground">Signal:</span>
+                              <span className="font-semibold text-foreground">{(lead.signal_score * 100).toFixed(0)}%</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex gap-2 flex-wrap justify-end">
+                          <Link to={`/lead/${lead.id}`}>
+                            <Button variant="outline" size="sm" className="gap-1 text-xs">
+                              <Eye className="w-3 h-3" /> Details
+                            </Button>
                           </Link>
-                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${priorityConfig[lead.priority].color}`}>
-                            {priorityConfig[lead.priority].emoji} {lead.priority}
-                          </span>
-                          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusConfig[lead.status]}`}>
-                            {lead.status}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-                          <span className="flex items-center gap-1"><MapPin className="w-3 h-3" /> {lead.location}</span>
-                          <span>{lead.industry}</span>
-                          <span>{lead.size} employees</span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="gap-1 text-xs"
+                            onClick={() => copyToClipboard(lead.email)}
+                          >
+                            <Copy className="w-3 h-3" /> Email
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="gap-1 text-xs text-success"
+                            onClick={() => toast({ title: "Marked as contacted", description: lead.company })}
+                          >
+                            <Check className="w-3 h-3" /> Contacted
+                          </Button>
                         </div>
                       </div>
                     </div>
-
-                    {/* Why this lead */}
-                    <div className="mt-3 ml-14">
-                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Why this lead?</p>
-                      <ul className="space-y-1">
-                        {lead.reasons.map((r, i) => (
-                          <li key={i} className="text-sm text-foreground flex items-start gap-2">
-                            <Check className="w-3.5 h-3.5 text-success mt-0.5 shrink-0" />
-                            <span>{r}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-
-                  {/* Right — Score + Actions */}
-                  <div className="flex lg:flex-col items-center lg:items-end gap-3 lg:gap-2 shrink-0 lg:min-w-[140px]">
-                    <div className="text-center lg:text-right">
-                      <div className="text-3xl font-display font-bold text-primary">{lead.score}</div>
-                      <div className="text-xs text-muted-foreground">/ 10</div>
-                    </div>
-                    <div className="flex gap-2 flex-wrap justify-end">
-                      <Link to={`/lead/${lead.id}`}>
-                        <Button variant="outline" size="sm" className="gap-1 text-xs">
-                          <Eye className="w-3 h-3" /> Details
-                        </Button>
-                      </Link>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="gap-1 text-xs"
-                        onClick={() => {
-                          navigator.clipboard.writeText(lead.email);
-                          toast({ title: "Email copied!", description: lead.email });
-                        }}
-                      >
-                        <Copy className="w-3 h-3" /> Email
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="gap-1 text-xs text-success"
-                        onClick={() => toast({ title: "Marked as contacted", description: lead.company })}
-                      >
-                        <Check className="w-3 h-3" /> Contacted
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
-        ))}
+                  </CardContent>
+                </Card>
+              </motion.div>
+            );
+          })
+        )}
       </motion.div>
     </div>
   );

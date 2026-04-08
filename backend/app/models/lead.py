@@ -21,7 +21,11 @@ class Lead(Document):
     
     # AI/RAG Information
     embeddings = ListField(FloatField())  # Vector embeddings (stored as list of floats)
-    relevance_score = FloatField()  # 0-1 relevance score
+    relevance_score = FloatField()  # 0-1 relevance score to campaign
+    lead_embedding = ListField(FloatField())  # Lead profile embedding (768-dim)
+    company_fit_score = FloatField(default=0.0)  # 0-1 score: how well lead matches company profile
+    signal_keywords = ListField(StringField())  # Detected hiring/funding/growth signals
+    signal_score = FloatField(default=0.0)  # 0-1 strength of growth signals
     ai_notes = StringField()  # AI-generated notes
     
     # Campaign Interaction
@@ -44,7 +48,7 @@ class Lead(Document):
     
     meta = {
         'collection': 'leads',
-        'indexes': ['campaign_id', 'email', 'status', 'created_at']
+        'indexes': ['campaign_id', 'email', 'status', 'created_at', 'company_fit_score']
     }
     
     def __repr__(self):

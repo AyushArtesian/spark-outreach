@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useNavigate } from "react-router-dom";
+import { leadsAPI } from "@/services/api";
+import { toast } from "@/hooks/use-toast";
 
 const serviceOptions = ["Web Development", "Mobile App Development", "Cloud Migration", "AI/ML Development", "DevOps Consulting", "Data Engineering", "UI/UX Design", "Cybersecurity"];
 const industryFilters = ["All", "SaaS", "FinTech", "Healthcare", "E-commerce", "EdTech", "Real Estate"];
@@ -31,25 +33,84 @@ export default function LeadSearch() {
   const toggleService = (s: string) => setSelectedServices((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
   const toggleSize = (s: string) => setSelectedSizes((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     setIsProcessing(true);
     setCurrentStep(0);
     setCompletedSteps([]);
 
-    let step = 0;
-    const runStep = () => {
-      if (step >= processingSteps.length) {
-        setTimeout(() => navigate("/leads"), 500);
-        return;
-      }
-      setCurrentStep(step);
+    try {
+      // Step 1: Analyze context
       setTimeout(() => {
-        setCompletedSteps((prev) => [...prev, step]);
-        step++;
-        runStep();
-      }, processingSteps[step].duration);
-    };
-    runStep();
+        setCurrentStep(0);
+        setTimeout(() => {
+          setCompletedSteps((prev) => [...prev, 0]);
+        }, processingSteps[0].duration);
+      }, 100);
+
+      // Step 2: Scan market
+      setTimeout(() => {
+        setCurrentStep(1);
+        setTimeout(() => {
+          setCompletedSteps((prev) => [...prev, 1]);
+        }, processingSteps[1].duration);
+      }, processingSteps[0].duration + 100);
+
+      // Step 3: Match opportunities
+      setTimeout(() => {
+        setCurrentStep(2);
+        setTimeout(() => {
+          setCompletedSteps((prev) => [...prev, 2]);
+        }, processingSteps[2].duration);
+      }, processingSteps[0].duration + processingSteps[1].duration + 100);
+
+      // Step 4: Score and rank (during this step, call the API)
+      setTimeout(async () => {
+        setCurrentStep(3);
+        
+        try {
+          // Build search query from form inputs
+          const query = `Find companies in ${selectedIndustry === "All" ? "all industries" : selectedIndustry} located in ${location} with size ${selectedSizes.length > 0 ? selectedSizes.join(", ") : "all sizes"} that need ${selectedServices.join(", ")}`;
+          
+          // Call the API
+          const results = await leadsAPI.search({
+            query: query,
+            filters: {
+              industry: selectedIndustry === "All" ? undefined : selectedIndustry,
+              location: location,
+              company_sizes: selectedSizes.length > 0 ? selectedSizes : undefined,
+              services: selectedServices,
+            },
+            top_k: 50,
+            sort_by: "combined",
+          });
+
+          // Store results in localStorage
+          localStorage.setItem("searchResults", JSON.stringify(results));
+          localStorage.setItem("searchQuery", query);
+
+          setTimeout(() => {
+            setCompletedSteps((prev) => [...prev, 3]);
+            setTimeout(() => navigate("/leads"), 500);
+          }, processingSteps[3].duration);
+        } catch (error) {
+          console.error("Search error:", error);
+          toast({
+            title: "Search Error",
+            description: error instanceof Error ? error.message : "Failed to search leads",
+            variant: "destructive",
+          });
+          setIsProcessing(false);
+        }
+      }, processingSteps[0].duration + processingSteps[1].duration + processingSteps[2].duration + 100);
+    } catch (error) {
+      console.error("Error:", error);
+      toast({
+        title: "Error",
+        description: "An error occurred during the search",
+        variant: "destructive",
+      });
+      setIsProcessing(false);
+    }
   };
 
   if (isProcessing) {
