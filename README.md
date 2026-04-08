@@ -26,6 +26,48 @@ The system is designed to turn company profile data and website content into sea
 
 ---
 
+## Lead Discovery and Search
+
+Spark Outreach is designed to go beyond static contacts and generate real company leads from public web signals.
+
+### How we find leads
+
+- The lead search service constructs a targeted discovery query from:
+  - user-selected location and industry filters
+  - service offerings and technology keywords
+  - company profile context and target markets
+- The backend scrapes public search results from DuckDuckGo and Bing HTML pages.
+- Candidate URLs are filtered to exclude directories, listicles, job boards, review sites, and low-value domains.
+- For each candidate company website, the system:
+  - fetches the homepage and high-priority internal pages (About, Services, Solutions, Team, Portfolio)
+  - extracts clean business content and removes menu/footer noise
+  - captures metadata like company name, email, phone, summary, and website URL
+- Discovered leads are stored with raw discovery metadata, quality scores, and a source URL.
+
+### How we search leads
+
+- Lead search leverages semantic embeddings and company fit scoring.
+- The search endpoint is `POST /api/v1/leads/search`.
+- Inputs include:
+  - natural language `query`
+  - optional `filters` such as `location`, `industry`, `services`, and `company_sizes`
+  - optional `campaign_id` and sort settings
+- The service re-discovers leads for every search to reflect changing query/filter combinations.
+- Each lead is scored on:
+  - company profile fit vs. the current user/company context
+  - growth and hiring signals detected in the scraped content
+  - semantic relevance to the user query
+- Search results include contact-oriented lead fields such as email, phone, website, company name, industry, and fit/signal scores.
+
+### Lead quality controls
+
+- The pipeline rejects noise pages with terms like "top 10", "list of", "jobs", and "rankings".
+- It skips known low-value domains such as Crunchbase, Clutch, Glassdoor, and other directory/review sources.
+- It prefers actual company profile pages and business websites over generic headline or list pages.
+- Leads are enriched with company summary and contact signals when available.
+
+---
+
 ## Backend Overview
 
 ### Core Backend Files
@@ -277,6 +319,7 @@ Open the frontend app at the Vite URL shown in the terminal, usually `http://loc
 ### Campaigns / Leads
 
 - campaign and lead routes are available under `/api/v1/campaigns` and `/api/v1/leads`
+- lead discovery/search endpoint: `POST /api/v1/leads/search`
 
 ---
 
