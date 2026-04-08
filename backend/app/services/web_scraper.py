@@ -1,17 +1,33 @@
 """Web scraper service for fetching company website and portfolio content."""
 
 import asyncio
+import os
 import re
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, List
 from urllib.parse import urljoin, urlparse, quote_plus, parse_qs, unquote
 
 import aiohttp
 from bs4 import BeautifulSoup
+import requests
 
 
 MAX_CONTENT_CHARS = 200000  # 200KB total - capture comprehensive company info
 MAX_PAGE_CHARS = 15000      # 15KB per page - get full page content
 MAX_INTERNAL_PAGES = 25     # Crawl up to 25 pages for complete coverage
+
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+]
+
+REFERERS = [
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://duckduckgo.com/",
+]
 
 
 LOCATION_ALIASES = {
@@ -60,6 +76,112 @@ def _clean_search_query_text(raw_query: str) -> str:
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def generate_high_intent_queries(
+    query: str,
+    location: Optional[str] = None,
+    industry: Optional[str] = None,
+    service_focus: Optional[list] = None,
+    min_queries: int = 10,
+    max_queries: int = 15,
+) -> List[str]:
+    """Generate 10-15 high-intent buying-signal queries for lead discovery."""
+    normalized_location = _normalize_location_text(location) or ""
+    normalized_industry = (industry or "").strip().lower()
+    industry_term = normalized_industry if normalized_industry and normalized_industry != "all" else "software"
+
+    service_items = [str(s).strip().lower() for s in (service_focus or []) if str(s).strip()]
+    primary_service = service_items[0] if service_items else "backend development"
+    service_tokens = [t for t in re.split(r"\W+", primary_service) if t]
+    service_short = " ".join(service_tokens[:3]) or "backend"
+
+    cleaned_seed = _clean_search_query_text(query)
+    
+    # === CHECK IF THIS IS SERVICE/PROVIDER FOCUSED (not buyer hiring) ===
+    # If industry is specific (e-commerce, fintech, etc.) and service_focus exists,
+    # generate PROVIDER queries (companies that sell solutions), not BUYER queries
+    is_provider_focus = (
+        normalized_industry and 
+        normalized_industry != "all" and 
+        normalized_industry != "software" and
+        service_items
+    )
+    
+    if is_provider_focus:
+        # === PROVIDER QUERIES: Find companies that BUILD/SELL solutions ===
+        templates = [
+            f"{industry_term} solution providers {normalized_location}".strip(),
+            f"custom {industry_term} development companies {normalized_location}".strip(),
+            f"{industry_term} platform development agencies {normalized_location}".strip(),
+            f"{industry_term} consulting companies {normalized_location}".strip(),
+            f"{industry_term} software development firms {normalized_location}".strip(),
+            f"{industry_term} technology partners {normalized_location}".strip(),
+            f"companies building {industry_term} solutions {normalized_location}".strip(),
+            f"{industry_term} system integrators {normalized_location}".strip(),
+            f"{service_short} development for {industry_term} {normalized_location}".strip(),
+            f"{industry_term} implementation partners {normalized_location}".strip(),
+            f"managed {industry_term} services providers {normalized_location}".strip(),
+            f"{industry_term} product companies {normalized_location}".strip(),
+            f"enterprise {industry_term} solution vendors {normalized_location}".strip(),
+            f"{industry_term} modernization services {normalized_location}".strip(),
+            f"digital transformation {industry_term} agencies {normalized_location}".strip(),
+        ]
+    else:
+        # === BUYER QUERIES: Find companies that are actively hiring (original template) ===
+        templates = [
+            f"{industry_term} companies hiring {service_short} engineers {normalized_location}".strip(),
+            f"startups in {normalized_location} hiring software engineers".strip(),
+            f"companies scaling backend systems {normalized_location}".strip(),
+            f"recently funded startups {normalized_location} {industry_term}".strip(),
+            f"{industry_term} product companies expanding engineering teams {normalized_location}".strip(),
+            f"b2b saas companies in {normalized_location} looking for {service_short}".strip(),
+            f"{industry_term} platform companies {normalized_location} hiring developers".strip(),
+            f"fast growing saas startups {normalized_location} engineering hiring".strip(),
+            f"{industry_term} companies modernizing legacy systems {normalized_location}".strip(),
+            f"venture backed {industry_term} startups {normalized_location}".strip(),
+            f"product companies in {normalized_location} scaling cloud infrastructure".strip(),
+            f"technology startups {normalized_location} hiring backend developers".strip(),
+            f"{industry_term} companies launching new product features {normalized_location}".strip(),
+            f"series a series b startups {normalized_location} {industry_term}".strip(),
+            f"software platform businesses {normalized_location} engineering expansion".strip(),
+        ]
+
+    if cleaned_seed:
+        templates.insert(0, cleaned_seed)
+
+    deduped = []
+    seen = set()
+    for candidate in templates:
+        normalized = _compact_query([candidate], max_len=220).strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+        if len(deduped) >= max_queries:
+            break
+
+    # Ensure minimum query count even for sparse inputs.
+    while len(deduped) < min_queries:
+        fallback = _compact_query([
+            industry_term,
+            primary_service,
+            normalized_location,
+            f"growth hiring signal query {len(deduped) + 1}",
+        ], max_len=220).strip().lower()
+        if fallback and fallback not in seen:
+            deduped.append(fallback)
+            seen.add(fallback)
+        else:
+            break
+
+    # Debug logging
+    query_type = "PROVIDER" if is_provider_focus else "BUYER"
+    print(f"[QUERY GENERATION] Type: {query_type} | Industry: {industry_term} | Service: {service_short} | Location: {normalized_location}")
+    for i, q in enumerate(deduped[:5], 1):
+        print(f"  Query {i}: {q}")
+    
+    return deduped[:max_queries]
 
 
 def _is_likely_noise_line(line: str) -> bool:
@@ -139,38 +261,112 @@ async def _fetch_html(
     url: str,
     session: aiohttp.ClientSession,
     timeout: int = 12,
+    max_retries: int = 3,
 ) -> Optional[str]:
-    """Fetch raw HTML with browser-like headers."""
+    """Fetch raw HTML with exponential backoff retry, UA rotation, and SSL fallback.
+    
+    Args:
+        url: URL to fetch
+        session: aiohttp session
+        timeout: Request timeout in seconds
+        max_retries: Maximum retry attempts (exponential backoff: base_delay * 2^attempt)
+    
+    Returns:
+        HTML content or None if all retries exhausted
+    """
     normalized = _normalize_url(url)
     if not normalized:
         return None
 
-    try:
-        async with session.get(
-            normalized,
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
-                "Cache-Control": "no-cache",
-                "Pragma": "no-cache",
-                "Referer": "https://www.google.com/",
-            },
-            allow_redirects=True,
-        ) as response:
-            if response.status < 200 or response.status >= 300:
-                print(f"Failed to fetch {normalized}: Status {response.status}")
+    timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+    base_delay = 0.5  # 0.5s base delay for exponential backoff
+    
+    for attempt in range(max_retries):
+        headers = {
+            "User-Agent": USER_AGENTS[attempt % len(USER_AGENTS)],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": REFERERS[attempt % len(REFERERS)],
+        }
+        request_kwargs = {
+            "timeout": timeout_cfg,
+            "headers": headers,
+            "allow_redirects": True,
+        }
+        
+        # Use SSL verification on first attempt, disable on retry for problematic sites
+        if attempt >= 1:
+            request_kwargs["ssl"] = False
+
+        try:
+            async with session.get(normalized, **request_kwargs) as response:
+                # Handle rate limiting and server errors with exponential backoff
+                if response.status == 429:  # Too Many Requests
+                    wait_time = base_delay * (2 ** attempt)
+                    print(f"Rate limited (429) for {normalized}. Waiting {wait_time:.2f}s before retry {attempt + 1}/{max_retries}")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                if response.status == 403:  # Forbidden - might be anti-bot
+                    wait_time = base_delay * (2 ** attempt)
+                    print(f"Forbidden (403) for {normalized}. Waiting {wait_time:.2f}s before retry...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                if response.status == 503:  # Service Unavailable
+                    wait_time = base_delay * (2 ** attempt)
+                    print(f"Service unavailable (503). Waiting {wait_time:.2f}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                if response.status < 200 or response.status >= 400:
+                    print(f"Failed to fetch {normalized}: HTTP {response.status} (not retrying)")
+                    return None
+                
+                # Success - read content
+                try:
+                    return await response.text(errors="ignore")
+                except Exception as decode_err:
+                    print(f"Decode error for {normalized}: {decode_err}. Trying raw decode...")
+                    raw = await response.read()
+                    return raw.decode("utf-8", errors="ignore")
+        
+        except (aiohttp.ClientSSLError, aiohttp.ClientConnectorCertificateError) as ssl_err:
+            print(f"SSL error for {normalized}: {ssl_err}")
+            if attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)
+                continue
+            else:
+                print(f"SSL error on final attempt for {normalized}")
                 return None
-            try:
-                return await response.text(errors="ignore")
-            except Exception:
-                raw = await response.read()
-                return raw.decode("utf-8", errors="ignore")
-    except Exception as e:
-        print(f"Error fetching {normalized}: {e}")
-        return None
+        
+        except asyncio.TimeoutError:
+            print(f"Timeout for {normalized} (attempt {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)
+                continue
+        
+        except (aiohttp.ClientConnectorError, aiohttp.ClientOSError) as conn_err:
+            print(f"Connection error for {normalized}: {conn_err}")
+            if attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)
+                continue
+        
+        except Exception as e:
+            print(f"Unexpected error fetching {normalized}: {e}")
+            if attempt < max_retries - 1:
+                wait_time = base_delay * (2 ** attempt)
+                await asyncio.sleep(wait_time)
+                continue
+
+    print(f"Failed to fetch {normalized} after {max_retries} attempts")
+    return None
 
 
 def _extract_priority_links(base_url: str, homepage_html: str) -> list:
@@ -486,7 +682,13 @@ def _append_candidate_result(
     snippet: str,
     blocked_domains: set,
 ) -> bool:
-    """Validate and append candidate result while deduping by domain."""
+    """Validate and append candidate result while deduping by domain.
+    
+    STRICT FILTERING:
+    - Reject service providers, agencies, outsourcers
+    - Only accept: SaaS, Product companies, Startups, Tech companies
+    - Multiple signals required for acceptance
+    """
     if not href.startswith(("http://", "https://")):
         return False
 
@@ -496,80 +698,104 @@ def _append_candidate_result(
     title_lower = (title or "").lower()
     snippet_lower = (snippet or "").lower()
 
+    # === HARD BLOCKS (Directory/Index sites) ===
     low_value_domain_tokens = {
-        "crunchbase",
-        "tracxn",
-        "g2",
-        "clutch",
-        "goodfirms",
-        "sortlist",
-        "designrush",
-        "upcity",
-        "wikipedia",
-        "yelp",
-        "justdial",
-        "glassdoor",
-        "indeed",
-        "naukri",
-        "monster",
-        "forbes",
-        "techcrunch",
-        "businessinsider",
-        "yourstory",
-        "inc42",
-        "wikipedia",
-        "infinityjobs",
-        "timesjobs",
-        "naukri",
-        "indeed",
-        "monster",
-        "apna",
-        "shine",
-        "freshersworld",
-        "glassdoor",
+        "crunchbase", "tracxn", "g2", "clutch", "goodfirms", "sortlist",
+        "designrush", "upcity", "wikipedia", "yelp", "justdial",
+        "glassdoor", "indeed", "naukri", "monster", "forbes",
+        "techcrunch", "businessinsider", "yourstory", "inc42",
+        "infinityjobs", "timesjobs", "apna", "shine", "freshersworld",
     }
+    
     low_value_text_tokens = {
-        "top 100",
-        "top 50",
-        "top 10",
-        "list of",
-        "best companies",
-        "best company",
-        "to work for",
-        "jobs in",
-        "job openings",
-        "salary",
-        "compare",
-        "rankings",
-        "directory",
-        "opening",
-        "vacancy",
-        "career",
+        "top 100", "top 50", "top 10", "list of", "best companies",
+        "best company", "to work for", "salary", "compare",
+        "rankings", "directory", "job board", "job listings",
+    }
+    
+    competitor_domain_tokens = {
+        "toptal", "infosys", "accenture", "wipro", "tcs",
+        "cognizant", "capgemini", "fiverr", "upwork", "freelancer",
+        "thoughtworks",
     }
 
+    # === PRODUCT/BUYER INTENT (Accept these) ===
+    product_company_tokens = {
+        "saas", "platform", "product company", "startup", "venture backed",
+        "series a", "series b", "b2b software", "cloud platform",
+        "software company", "tech company", "fintech", "edtech",
+        "proptech", "deep-tech", "ai platform", "api first",
+    }
+
+    # === SERVICE PROVIDER / AGENCY (Strictly reject these) ===
+    service_provider_tokens = {
+        "it services", "outsourcing", "staff augmentation",
+        "hire dedicated developers", "freelance service", "web agency",
+        "digital agency", "marketing agency", "design agency",
+        "development shop", "consulting firm", "management consulting",
+        "business consulting", "it consulting", "software consulting",
+        "system integration", "system integrator", "integrator",
+        "consulting services", "managed services", "professional services",
+        "business process outsourcing", "bpo", "shared services",
+        "temporary staffing", "contract staffing", "staffing agency",
+        "recruitment agency", "placement agency", "recruitment firm",
+    }
+
+    # === BLACKLIST PATH PATTERNS ===
     if not domain:
         return False
     if any(token in domain for token in low_value_domain_tokens):
         return False
+    if any(token in domain for token in competitor_domain_tokens):
+        return False
     if any(domain == d or domain.endswith(f".{d}") for d in blocked_domains):
         return False
+    
+    # Reject directory/listing/job-related results
     if any(token in title_lower for token in low_value_text_tokens):
         return False
     if any(token in snippet_lower for token in low_value_text_tokens):
         return False
     if any(token in path for token in ["/list", "/top", "/best", "/jobs", "/rank", "/compare"]):
         return False
-    if any(token in path for token in ["/career", "/careers", "/vacancies", "/job", "/hiring"]):
+    if any(token in path for token in ["/vacancies", "/jobs/"]):
         return False
-    if " job" in title_lower or "jobs" in title_lower:
+    if " job" in title_lower or "jobs in" in title_lower:
         return False
     if re.search(r"\b(20\d{2}|top\s*\d+)\b", title_lower):
         return False
     if re.match(r"^\d+\s+", title_lower):
         return False
+
+    merged_text = f"{title_lower} {snippet_lower}".strip()
+
+    # === STRICT SERVICE PROVIDER REJECTION ===
+    # Count service provider keywords - if ANY found, it's likely a service provider
+    service_provider_count = 0
+    for token in service_provider_tokens:
+        if token in merged_text:
+            service_provider_count += 1
+    
+    if service_provider_count >= 1:
+        # Service provider keywords found - only override if strong product signals
+        product_signals = 0
+        for token in product_company_tokens:
+            if token in merged_text:
+                product_signals += 1
+        
+        # Need multiple product signals to override service provider keywords
+        if product_signals == 0:
+            return False  # Pure service provider, no product signals
+        if product_signals == 1 and "platform" not in merged_text and "product" not in merged_text:
+            return False  # Weak product signals, likely still a service provider
+        # If multiple strong product signals, allow it (e.g., "consulting + saas platform")
+
+    # === Deduplication ===
     if domain in seen_domains:
         return False
 
+    # === Add to results ===
+    buyer_intent_signal = any(token in merged_text for token in product_company_tokens)
     company_name = (title or "").split("|")[0].split("-")[0].strip() or domain.split(".")[0].title()
     canonical_url = f"https://{domain}"
     seen_domains.add(domain)
@@ -579,9 +805,128 @@ def _append_candidate_result(
             "url": canonical_url,
             "domain": domain,
             "snippet": (snippet or "")[:300],
+            "buyer_intent_signal": buyer_intent_signal,
         }
     )
     return True
+
+
+def analyze_business_signals(
+    snippet: str,
+    website_text: str,
+    service_focus: Optional[list] = None,
+    search_query: Optional[str] = None,
+) -> Dict[str, object]:
+    """Detect hiring/scaling/SaaS/tech intent signals using rule + semantic heuristics.
+    
+    Returns dict with:
+    - signals: list of detected signals (hiring, scaling, saas_platform, tech_heavy, funding)
+    - confidence: 0-1 composite score from signal strength + semantic hints
+    - tech_relevance: 0-1 score for technical relevance to service focus
+    - reason: list of reason strings explaining the signals
+    """
+    snippet_text = (snippet or "").lower()
+    website_summary = (website_text or "").lower()
+    query_text = (search_query or "").lower()
+    searchable = f"{snippet_text} {website_summary} {query_text}".strip()
+
+    # === SIGNAL DEFINITIONS ===
+    rule_map = {
+        "hiring": [
+            "hiring", "we are hiring", "join our team", "open positions", "open roles",
+            "careers page", "engineering careers", "careers at", "now hiring",
+            "career opportunities", "hiring engineers", "hiring developers",
+        ],
+        "scaling": [
+            "scaling", "hypergrowth", "rapid growth", "expanding", "growth stage",
+            "scale platform", "scaling infrastructure", "growing team",
+        ],
+        "saas_platform": [
+            "saas", "platform", "subscription", "multi-tenant", "product-led",
+            "b2b software", "cloud-based", "software-as-a-service", "software platform",
+        ],
+        "tech_heavy": [
+            "api", "backend", "microservices", "cloud", "devops",
+            "data platform", "engineering infrastructure", "technology stack",
+        ],
+        "funding": [
+            "series a", "series b", "funded startup", "venture capital",
+            "raised funding", "investor backed", "vc funded", "angel investors",
+        ],
+    }
+
+    # Higher base weights for stronger signals
+    weights = {
+        "hiring": 0.30,         # Strong indicator of active hiring
+        "scaling": 0.25,         # Strong indicator of growth
+        "saas_platform": 0.22,   # Strong product signal
+        "tech_heavy": 0.18,      # Indicates tech company
+        "funding": 0.15,         # Indicates serious company
+    }
+
+    detected = []
+    reasons = []
+    strength = 0.0
+    
+    for signal, tokens in rule_map.items():
+        matched = [token for token in tokens if token in searchable]
+        if not matched:
+            continue
+        detected.append(signal)
+        strength += weights.get(signal, 0.0)
+        reasons.append(f"{signal} signal via: {', '.join(matched[:2])}")
+
+    # === SERVICE FOCUS RELEVANCE ===
+    service_terms = [str(s).lower() for s in (service_focus or []) if str(s).strip()]
+    service_hits = []
+    for service in service_terms:
+        for token in [t for t in re.split(r"\W+", service) if len(t) > 2]:
+            if token in searchable:
+                service_hits.append(token)
+    
+    tech_relevance = 0.0
+    if service_terms:
+        # Base relevance: 0.25 + bonus for each service hit
+        tech_relevance = min(1.0, 0.25 + 0.15 * len(set(service_hits)))
+    else:
+        # If no service terms, check for tech signals in content
+        tech_relevance = 0.45 if "tech_heavy" in detected else 0.25
+    
+    if service_hits:
+        reasons.append(f"service relevance via: {', '.join(sorted(set(service_hits))[:4])}")
+
+    # === SEMANTIC BONUSES & PENALTIES ===
+    semantic_hint = 0.0
+    
+    # Strong product company indicators
+    product_indicators = [
+        "product company", "platform company", "startup", "b2b saas",
+        "product-led growth", "venture backed", "series a startup", "series b startup",
+    ]
+    if any(t in searchable for t in product_indicators):
+        semantic_hint += 0.18
+    
+    # Mid-strength product indicators
+    if any(t in searchable for t in ["saas", "subscription", "platform", "cloud product"]):
+        semantic_hint += 0.10
+    
+    # Strong negative indicators (reducing confidence if service provider)
+    anti_indicators = [
+        "staff augmentation", "outsourcing partner", "hire our developers",
+        "it consulting firm", "agency model", "freelance marketplace",
+    ]
+    if any(t in searchable for t in anti_indicators):
+        semantic_hint -= 0.20
+
+    # === FINAL CONFIDENCE CALCULATION ===
+    confidence = max(0.0, min(1.0, strength + semantic_hint))
+    
+    return {
+        "signals": sorted(set(detected)),
+        "confidence": confidence,
+        "tech_relevance": max(0.0, min(1.0, tech_relevance)),
+        "reason": reasons,
+    }
 
 
 async def fetch_company_profile_snapshot(url: str) -> Dict[str, str]:
@@ -671,6 +1016,165 @@ def _compact_query(parts: list, max_len: int = 260) -> str:
     return query[:max_len].rsplit(" ", 1)[0]
 
 
+def _is_valid_domain(domain: str) -> bool:
+    """Validate domain format and check for blocked patterns."""
+    if not domain:
+        return False
+    
+    # Domain must have TLD
+    if "." not in domain or len(domain.split(".")[-1]) < 2:
+        return False
+    
+    # Block known problematic domains
+    blocked_patterns = {
+        "2captcha", "captcha", "recaptcha",
+        "verify-human",
+        "ip.address", "localhost", "127.0.0.1",
+    }
+    for pattern in blocked_patterns:
+        if pattern in domain.lower():
+            return False
+    
+    return True
+
+
+async def _validate_domain_ssl(url: str, timeout: int = 8) -> bool:
+    """Check if domain has valid SSL certificate. Return False only for hard SSL failures.
+    
+    Returns:
+        True if domain is valid/accessible
+        False if hard SSL error (certificate invalid, not a domain, etc.)
+    """
+    normalized = _normalize_url(url)
+    if not normalized:
+        return False
+    
+    parsed = urlparse(normalized)
+    domain = parsed.netloc
+    
+    try:
+        timeout_cfg = aiohttp.ClientTimeout(total=timeout)
+        # First attempt: normal SSL
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.head(
+                    normalized,
+                    timeout=timeout_cfg,
+                    allow_redirects=True,
+                    ssl=True
+                ) as response:
+                    # Any successful response (even 404/403) means domain is valid
+                    return True
+            except (aiohttp.ClientSSLError, aiohttp.ClientConnectorCertificateError) as ssl_err:
+                print(f"SSL warning for {domain}: {ssl_err}. Will retry with SSL verification disabled.")
+                # Retry without SSL verification - if it works, domain exists (just has cert issues)
+                try:
+                    async with session.head(
+                        normalized,
+                        timeout=timeout_cfg,
+                        allow_redirects=True,
+                        ssl=False
+                    ) as response:
+                        return True
+                except Exception as retry_err:
+                    print(f"Hard SSL failure for {domain}: {retry_err}")
+                    return False  # Domain doesn't exist or completely unreachable
+    except Exception as e:
+        print(f"Domain validation error for {domain}: {e}")
+        return False
+    
+    return False
+
+
+def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2) -> Optional[List[Dict]]:
+    """Search using SerpAPI with exponential backoff retry logic.
+    
+    Args:
+        query: Search query string
+        max_retries: Maximum retry attempts for failed requests
+        retry_delay: Starting delay in seconds (exponential backoff)
+    
+    Returns:
+        List of search results with url, title, snippet
+    """
+    # Import here to avoid circular imports
+    from app.config import settings
+    
+    api_key = settings.SERPAPI_KEY or settings.SERPER_API_KEY
+    if not api_key:
+        print("Warning: SERPAPI_KEY or SERPER_API_KEY not set in .env file. Using fallback search.")
+        return None
+    
+    headers = {
+        "User-Agent": USER_AGENTS[0],
+        "Accept": "application/json",
+    }
+    
+    params = {
+        "q": query,
+        "api_key": api_key,
+        "num": 10,  # Get 10 results per query for filtering
+        "engine": "google",
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"SerpAPI search: query='{query[:60]}...' attempt={attempt + 1}/{max_retries}")
+            response = requests.get(
+                "https://serpapi.com/search",
+                params=params,
+                headers=headers,
+                timeout=12
+            )
+            
+            if response.status_code == 429:  # Rate limit
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"SerpAPI rate limited. Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+                continue
+            
+            if response.status_code == 403:  # Forbidden
+                print(f"SerpAPI returned 403 Forbidden. Check API key and quota.")
+                return None
+            
+            if response.status_code != 200:
+                print(f"SerpAPI returned status {response.status_code}")
+                return None
+            
+            data = response.json()
+            results = []
+            
+            # Extract organic results
+            organic_results = data.get("organic_results", [])
+            for result in organic_results:
+                results.append({
+                    "url": result.get("link", "").strip(),
+                    "title": result.get("title", "").strip(),
+                    "snippet": result.get("snippet", "").strip(),
+                    "source": "Google",
+                })
+            
+            print(f"SerpAPI returned {len(results)} results for query '{query[:40]}...'")
+            return results
+        
+        except requests.exceptions.Timeout:
+            print(f"SerpAPI timeout on attempt {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                time.sleep(wait_time)
+        except requests.exceptions.ConnectionError as e:
+            print(f"SerpAPI connection error: {e}")
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                time.sleep(wait_time)
+        except Exception as e:
+            print(f"SerpAPI error: {e}")
+            return None
+    
+    print(f"SerpAPI search failed after {max_retries} attempts")
+    return None
+
+
 async def discover_company_websites(
     query: str,
     location: Optional[str] = None,
@@ -680,46 +1184,21 @@ async def discover_company_websites(
     context_keywords: Optional[list] = None,
     max_results: int = 20,
 ) -> list:
-    """Discover candidate company websites from public search results."""
+    """Discover candidate company websites from high-intent public search results using SerpAPI."""
     query_text = (query or "").strip()
     if not query_text:
         return []
 
-    cleaned_query = _clean_search_query_text(query_text)
-    normalized_location = _normalize_location_text(location)
-    parts = []
-    if industry and str(industry).lower() != "all":
-        parts.append(str(industry))
-    if normalized_location:
-        parts.append(normalized_location)
-    if service_focus:
-        parts.append(" ".join([str(s) for s in service_focus if s]))
-    if target_locations:
-        parts.append(" ".join([str(t) for t in target_locations[:3] if t]))
-    if cleaned_query:
-        parts.append(cleaned_query)
-    # Use a concise search phrase that emphasizes company software/service discovery.
-    parts.append("software development company b2b")
-    search_query = _compact_query(parts, max_len=260)
-    fallback_query = _compact_query([
-        normalized_location or "",
-        industry or "",
-        " ".join([str(s) for s in (service_focus or [])[:3]]),
-        cleaned_query,
-        "software development company b2b",
-    ], max_len=180)
+    # Limit to 8-10 high-quality queries
+    generated_queries = generate_high_intent_queries(
+        query=query_text,
+        location=location,
+        industry=industry,
+        service_focus=service_focus,
+        min_queries=8,
+        max_queries=10,
+    )
 
-    no_location_query = _compact_query([
-        industry or "",
-        " ".join([str(s) for s in (service_focus or [])[:3]]),
-        "software development company b2b",
-        "india",
-    ], max_len=160)
-
-    ddg_search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(search_query)}"
-    bing_search_url = f"https://www.bing.com/search?q={quote_plus(search_query)}"
-    bing_fallback_url = f"https://www.bing.com/search?q={quote_plus(fallback_query)}"
-    bing_no_location_url = f"https://www.bing.com/search?q={quote_plus(no_location_query)}"
     blocked_domains = {
         "duckduckgo.com",
         "bing.com",
@@ -736,122 +1215,49 @@ async def discover_company_websites(
 
     results = []
     seen_domains = set()
+    request_delay = 1.5  # 1.5 second delay between queries
 
     try:
-        async with aiohttp.ClientSession() as session:
-            # Primary source: DuckDuckGo HTML
-            ddg_html = await _fetch_html(ddg_search_url, session, timeout=15)
-            if ddg_html:
-                soup = BeautifulSoup(ddg_html, "html.parser")
-                for anchor in soup.select("a.result__a"):
-                    href = _resolve_duckduckgo_url(anchor.get("href", ""))
-                    title = anchor.get_text(" ", strip=True)
+        for idx, search_query in enumerate(generated_queries):
+            if len(results) >= max_results:
+                break
 
-                    snippet = ""
-                    block = anchor.find_parent("div", class_="result")
-                    if block:
-                        snippet_node = block.select_one("a.result__snippet, div.result__snippet")
-                        if snippet_node:
-                            snippet = snippet_node.get_text(" ", strip=True)
+            # Add delay between requests (exponential backoff friendly)
+            if idx > 0:
+                print(f"Waiting {request_delay}s before next query...")
+                time.sleep(request_delay)
 
-                    _append_candidate_result(
-                        results=results,
-                        seen_domains=seen_domains,
-                        href=href,
-                        title=title,
-                        snippet=snippet,
-                        blocked_domains=blocked_domains,
-                    )
-
+            # Try SerpAPI first (production-grade)
+            serpapi_results = _search_with_serpapi(search_query, max_retries=2, retry_delay=1)
+            
+            if serpapi_results:
+                for result in serpapi_results:
+                    href = result.get("url", "").strip()
+                    title = result.get("title", "").strip()
+                    snippet = result.get("snippet", "").strip()
+                    
+                    # Validate domain before processing
+                    parsed = urlparse(href)
+                    domain = (parsed.netloc or "").lower().replace("www.", "")
+                    
+                    if _is_valid_domain(domain):
+                        _append_candidate_result(
+                            results=results,
+                            seen_domains=seen_domains,
+                            href=href,
+                            title=title,
+                            snippet=snippet,
+                            blocked_domains=blocked_domains,
+                        )
+                    
                     if len(results) >= max_results:
                         break
 
-            # Fallback source: Bing HTML (used when DDG is sparse or blocked)
-            if len(results) < max_results:
-                bing_html = await _fetch_html(bing_search_url, session, timeout=15)
-                if bing_html:
-                    soup = BeautifulSoup(bing_html, "html.parser")
-                    for item in soup.select("li.b_algo"):
-                        anchor = item.select_one("h2 a")
-                        if not anchor:
-                            continue
-
-                        href = (anchor.get("href") or "").strip()
-                        title = anchor.get_text(" ", strip=True)
-                        snippet_node = item.select_one(".b_caption p")
-                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
-
-                        _append_candidate_result(
-                            results=results,
-                            seen_domains=seen_domains,
-                            href=href,
-                            title=title,
-                            snippet=snippet,
-                            blocked_domains=blocked_domains,
-                        )
-
-                        if len(results) >= max_results:
-                            break
-
-            # Secondary Bing pass with shorter query if still sparse
-            if len(results) < max_results:
-                bing_html = await _fetch_html(bing_fallback_url, session, timeout=15)
-                if bing_html:
-                    soup = BeautifulSoup(bing_html, "html.parser")
-
-                    # First try standard Bing result cards
-                    for item in soup.select("li.b_algo, .b_algo"):
-                        anchor = item.select_one("h2 a") or item.select_one("a[href]")
-                        if not anchor:
-                            continue
-
-                        href = (anchor.get("href") or "").strip()
-                        title = anchor.get_text(" ", strip=True)
-                        snippet_node = item.select_one(".b_caption p, p")
-                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
-
-                        _append_candidate_result(
-                            results=results,
-                            seen_domains=seen_domains,
-                            href=href,
-                            title=title,
-                            snippet=snippet,
-                            blocked_domains=blocked_domains,
-                        )
-
-                        if len(results) >= max_results:
-                            break
-
-            # Third pass: remove location to recover from sparse city spelling/network indexing issues
-            if len(results) < max_results:
-                bing_html = await _fetch_html(bing_no_location_url, session, timeout=15)
-                if bing_html:
-                    soup = BeautifulSoup(bing_html, "html.parser")
-                    for item in soup.select("li.b_algo, .b_algo"):
-                        anchor = item.select_one("h2 a") or item.select_one("a[href]")
-                        if not anchor:
-                            continue
-
-                        href = (anchor.get("href") or "").strip()
-                        title = anchor.get_text(" ", strip=True)
-                        snippet_node = item.select_one(".b_caption p, p")
-                        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
-
-                        _append_candidate_result(
-                            results=results,
-                            seen_domains=seen_domains,
-                            href=href,
-                            title=title,
-                            snippet=snippet,
-                            blocked_domains=blocked_domains,
-                        )
-
-                        if len(results) >= max_results:
-                            break
-
-            print(f"Discovery results: query='{search_query}' total={len(results)}")
+        print(f"Discovery results: queries={len(generated_queries)} total={len(results)}")
     except Exception as e:
         print(f"Error discovering company websites: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
     return results

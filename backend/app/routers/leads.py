@@ -12,7 +12,7 @@ from app.services.lead_service import lead_service
 from app.services.ai_service import ai_service
 from app.utils.auth import decode_token
 from app.utils.response import serialize_lead
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -34,6 +34,9 @@ class LeadSearchResult(BaseModel):
     industry: Optional[str]
     source_url: Optional[str] = None
     company_summary: Optional[str] = None
+    score: float = 0.0
+    signals: List[str] = Field(default_factory=list)
+    reason: List[str] = Field(default_factory=list)
     company_fit_score: float
     signal_score: float
     signal_keywords: List[str]
@@ -111,6 +114,8 @@ async def search_leads(
         search_results = []
         for lead in results:
             lead_raw = lead.raw_data or {}
+            signals = lead_raw.get("discovery_signals") or lead.signal_keywords or []
+            score_10 = round(float(lead_raw.get("final_score", 0.0) or 0.0) * 10.0, 2)
             search_results.append(LeadSearchResult(
                 id=str(lead.id),
                 name=lead.name,
@@ -121,6 +126,9 @@ async def search_leads(
                 industry=lead.industry,
                 source_url=lead_raw.get("source_url") or lead_raw.get("company_website"),
                 company_summary=lead_raw.get("company_summary"),
+                score=score_10,
+                signals=signals,
+                reason=lead_raw.get("final_reason", []),
                 company_fit_score=lead.company_fit_score or 0.0,
                 signal_score=lead.signal_score or 0.0,
                 signal_keywords=lead.signal_keywords or [],
