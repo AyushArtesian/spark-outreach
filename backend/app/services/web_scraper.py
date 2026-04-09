@@ -85,6 +85,7 @@ def generate_high_intent_queries(
     service_focus: Optional[list] = None,
     min_queries: int = 10,
     max_queries: int = 15,
+    log_prefix: str = "[QUERY GENERATION: HEURISTIC]",
 ) -> List[str]:
     """Generate 10-15 high-intent buying-signal queries for lead discovery."""
     normalized_location = _normalize_location_text(location) or ""
@@ -177,9 +178,9 @@ def generate_high_intent_queries(
 
     # Debug logging
     query_type = "PROVIDER" if is_provider_focus else "BUYER"
-    print(f"[QUERY GENERATION] Type: {query_type} | Industry: {industry_term} | Service: {service_short} | Location: {normalized_location}")
+    print(f"{log_prefix} Type: {query_type} | Industry: {industry_term} | Service: {service_short} | Location: {normalized_location}")
     for i, q in enumerate(deduped[:5], 1):
-        print(f"  Query {i}: {q}")
+        print(f"{log_prefix} Query {i}: {q}")
     
     return deduped[:max_queries]
 
@@ -1182,6 +1183,7 @@ async def discover_company_websites(
     service_focus: Optional[list] = None,
     target_locations: Optional[list] = None,
     context_keywords: Optional[list] = None,
+    planned_queries: Optional[list] = None,
     max_results: int = 20,
 ) -> list:
     """Discover candidate company websites from high-intent public search results using SerpAPI."""
@@ -1189,15 +1191,59 @@ async def discover_company_websites(
     if not query_text:
         return []
 
-    # Limit to 8-10 high-quality queries
-    generated_queries = generate_high_intent_queries(
-        query=query_text,
-        location=location,
-        industry=industry,
-        service_focus=service_focus,
-        min_queries=8,
-        max_queries=10,
+    # Merge optional LLM-planned queries with deterministic fallback.
+    generated_queries = []
+    seen_queries = set()
+
+    for candidate in (planned_queries or []):
+        normalized = _compact_query([candidate], max_len=220).strip().lower()
+        if not normalized or normalized in seen_queries:
+            continue
+        seen_queries.add(normalized)
+        generated_queries.append(normalized)
+        if len(generated_queries) >= 10:
+            break
+
+    if planned_queries:
+        print(f"[QUERY GENERATION: LLM] received_planned_queries={len(planned_queries)}")
+        for idx, q in enumerate(generated_queries[:5], 1):
+            print(f"[QUERY GENERATION: LLM] Query {idx}: {q}")
+
+    # Build deterministic fallback only when LLM did not provide enough unique queries.
+    heuristic_queries: List[str] = []
+    if len(generated_queries) < 8:
+        heuristic_queries = generate_high_intent_queries(
+            query=query_text,
+            location=location,
+            industry=industry,
+            service_focus=service_focus,
+            min_queries=8,
+            max_queries=10,
+            log_prefix="[QUERY GENERATION: HEURISTIC]",
+        )
+        print(
+            f"[QUERY GENERATION: MERGE] llm_count={len(generated_queries)} "
+            f"heuristic_count={len(heuristic_queries)}"
+        )
+
+    for fallback_query in heuristic_queries:
+        normalized = str(fallback_query).strip().lower()
+        if not normalized or normalized in seen_queries:
+            continue
+        seen_queries.add(normalized)
+        generated_queries.append(normalized)
+        if len(generated_queries) >= 10:
+            break
+
+    query_source = "LLM" if planned_queries else "HEURISTIC"
+    if planned_queries and len(generated_queries) < 8:
+        query_source = "LLM+HEURISTIC"
+    print(
+        f"[QUERY GENERATION: FINAL] source={query_source} "
+        f"final_queries={len(generated_queries)}"
     )
+    for idx, q in enumerate(generated_queries[:10], 1):
+        print(f"[QUERY GENERATION: FINAL] Query {idx}: {q}")
 
     blocked_domains = {
         "duckduckgo.com",

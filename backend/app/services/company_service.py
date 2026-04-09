@@ -8,6 +8,7 @@ from app.services.ai_service import generate_embeddings, generate_completion
 from app.services.web_scraper import fetch_all_portfolio_content, combine_portfolio_content
 from app.utils.embeddings import embedding_service
 from datetime import datetime
+from bson import ObjectId
 import json
 
 class CompanyService:
@@ -134,7 +135,14 @@ class CompanyService:
     @staticmethod
     async def query_company_profile(owner_id: str, query: str, top_k: int = 3) -> dict:
         """Query company profile content using embeddings for relevance ranking."""
-        profile = CompanyProfile.objects(owner_id=owner_id).first()
+        owner_id_str = str(owner_id)
+        profile = None
+        try:
+            profile = CompanyProfile.objects(owner_id=ObjectId(owner_id_str)).first()
+        except Exception:
+            profile = None
+        if not profile:
+            profile = CompanyProfile.objects(owner_id=owner_id_str).first()
         if not profile:
             raise ValueError("Company profile not found")
 

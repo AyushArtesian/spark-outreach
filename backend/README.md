@@ -156,6 +156,11 @@ Key environment variables to configure:
 DATABASE_URL              # Database connection string
 SECRET_KEY               # JWT secret key
 OPENAI_API_KEY          # OpenAI API key for embeddings and LLM
+LLM_PROVIDER            # gemini | groq | openai
+GROQ_API_KEY            # Groq API key for Qwen-based workflows
+GROQ_MODEL              # Groq model id (default: qwen/qwen3-32b)
+LEAD_QUERY_PLANNER_ENABLED      # Enable LLM-based search query planning
+LEAD_QUERY_PLANNER_MAX_QUERIES  # Max generated search queries
 DEBUG                   # Enable debug mode (False for production)
 CORS_ORIGINS            # Comma-separated list of allowed origins
 ```

@@ -28,11 +28,17 @@ class Settings(BaseSettings):
     
     # Google Gemini API
     GEMINI_API_KEY: Optional[str] = None
-    LLM_PROVIDER: str = "gemini"  # "gemini" or "openai"
+    LLM_PROVIDER: str = "gemini"  # "gemini", "groq", or "openai"
     GEMINI_MODEL: str = "gemini-1.5-flash"
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "qwen/qwen3-32b"
     
     # OpenAI API (optional, for future use)
     OPENAI_API_KEY: Optional[str] = None
+
+    # Lead discovery query planning
+    LEAD_QUERY_PLANNER_ENABLED: bool = True
+    LEAD_QUERY_PLANNER_MAX_QUERIES: int = 10
     
     # Hugging Face Inference API (for embeddings)
     HF_API_KEY: Optional[str] = None

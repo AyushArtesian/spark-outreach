@@ -172,6 +172,96 @@ class LeadService:
         target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
         context_keywords = [*company_services, *company_tech, *company_expertise]
 
+        planner_meta: Dict[str, Any] = {
+            "planner": "heuristic",
+            "strategy": "Deterministic query templates",
+            "model": "heuristic",
+            "quality_summary": {},
+            "planned_queries_count": 0,
+            "retrieved_context_count": 0,
+        }
+        planned_queries: List[str] = []
+
+        if company_profile:
+            company_profile_payload = {
+                "company_name": company_profile.company_name,
+                "company_description": company_profile.company_description,
+                "company_narrative": company_profile.company_narrative,
+                "services": company_services,
+                "technologies": company_tech,
+                "expertise_areas": company_expertise,
+                "target_industries": company_profile.target_industries or [],
+                "target_locations": target_locations,
+            }
+
+            retrieved_context_chunks: List[str] = []
+            try:
+                from app.services.company_service import CompanyService
+
+                retrieval = await CompanyService.query_company_profile(
+                    owner_id=owner_id,
+                    query=query,
+                    top_k=5,
+                )
+                retrieved_context_chunks = [
+                    str(item.get("chunk", "")).strip()
+                    for item in retrieval.get("results", [])
+                    if str(item.get("chunk", "")).strip()
+                ]
+                print(
+                    "[LEAD QUERY PLANNER] "
+                    f"owner={owner_id} retrieved_context_chunks={len(retrieved_context_chunks)}"
+                )
+            except Exception as e:
+                print(f"Company retrieval for query planner failed: {e}")
+
+            try:
+                from app.services.ai_service import ai_service
+
+                planner_output = await ai_service.plan_lead_discovery_queries(
+                    user_query=query,
+                    filters={
+                        "location": location,
+                        "industry": industry,
+                        "services": service_focus or company_services,
+                        "target_locations": target_locations,
+                    },
+                    company_profile=company_profile_payload,
+                    retrieved_context=retrieved_context_chunks,
+                    max_queries=10,
+                )
+                planned_queries = [
+                    str(q).strip() for q in planner_output.get("queries", []) if str(q).strip()
+                ]
+                planner_meta = {
+                    "planner": planner_output.get("planner", "heuristic"),
+                    "strategy": planner_output.get("strategy", ""),
+                    "model": planner_output.get("model", "heuristic"),
+                    "quality_summary": planner_output.get("quality_summary", {}),
+                    "planned_queries_count": len(planned_queries),
+                    "retrieved_context_count": len(retrieved_context_chunks),
+                }
+                print(
+                    "[LEAD QUERY PLANNER] "
+                    f"owner={owner_id} planner={planner_meta['planner']} "
+                    f"model={planner_meta['model']} "
+                    f"planned_queries={len(planned_queries)}"
+                )
+                quality_summary = planner_meta.get("quality_summary") or {}
+                if quality_summary:
+                    print(
+                        "[LEAD QUERY PLANNER] "
+                        f"quality_selected={quality_summary.get('selected_count', 0)} "
+                        f"quality_avg_score={quality_summary.get('avg_score', 0.0)}"
+                    )
+                if planner_meta.get("strategy"):
+                    print(f"[LEAD QUERY PLANNER] strategy={str(planner_meta['strategy'])[:220]}")
+            except Exception as e:
+                print(f"Lead query planning failed: {e}")
+
+        if not planned_queries:
+            print("[LEAD QUERY PLANNER] Using heuristic query generation fallback.")
+
         discovered = await discover_company_websites(
             query=query,
             location=location,
@@ -179,6 +269,7 @@ class LeadService:
             service_focus=service_focus or company_services,
             target_locations=target_locations,
             context_keywords=context_keywords,
+            planned_queries=planned_queries,
             max_results=max_results,
         )
         if not discovered:
@@ -344,6 +435,8 @@ class LeadService:
                     "search_key": search_key,
                     "service_focus": service_focus or [],
                     "context_keyword_hits": list(set(keyword_hits)),
+                    "query_planner": planner_meta,
+                    "planned_search_queries": planned_queries,
                     "discovery_relevance_hint": relevance_hint,
                     "company_summary": snapshot.get("summary", ""),
                     "company_email": snapshot.get("email", ""),
