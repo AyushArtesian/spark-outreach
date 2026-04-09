@@ -1,7 +1,7 @@
 """
 Service for lead operations using MongoDB
 """
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set, Tuple
 from app.models.lead import Lead
 from app.models.company import CompanyProfile
 from app.schemas.lead import LeadCreate, LeadUpdate
@@ -13,8 +13,124 @@ from urllib.parse import urlparse
 import re
 import hashlib
 
+
+NEARBY_LOCATION_HINTS = {
+    "mohali": [
+        "sahibzada ajit singh nagar",
+        "sas nagar",
+        "chandigarh",
+        "panchkula",
+        "zirakpur",
+        "kharar",
+    ],
+    "chandigarh": ["mohali", "panchkula", "zirakpur", "kharar"],
+    "gurgaon": ["gurugram", "delhi", "new delhi", "noida", "faridabad", "manesar", "sohna"],
+    "gurugram": ["gurgaon", "delhi", "new delhi", "noida", "faridabad", "manesar", "sohna"],
+    "bangalore": ["bengaluru", "electronic city", "whitefield"],
+    "bengaluru": ["bangalore", "electronic city", "whitefield"],
+    "pune": ["hinjewadi", "wakad", "baner"],
+    "hyderabad": ["hitech city", "gachibowli", "secunderabad"],
+    "delhi": ["new delhi", "noida", "gurgaon", "gurugram", "faridabad"],
+    "new delhi": ["delhi", "noida", "gurgaon", "gurugram", "faridabad"],
+}
+
 class LeadService:
     """Service for lead-related operations with MongoDB"""
+
+    @staticmethod
+    def _canonical_domain(value: str) -> str:
+        """Normalize URL/domain to a stable root domain for dedupe checks."""
+        raw = (value or "").strip().lower()
+        if not raw:
+            return ""
+
+        if "://" in raw:
+            host = (urlparse(raw).netloc or "").lower()
+        else:
+            host = raw.split("/", 1)[0]
+
+        host = host.split(":", 1)[0].replace("www.", "").replace("m.", "")
+        if not host or "." not in host:
+            return host
+
+        parts = [p for p in host.split(".") if p]
+        if len(parts) <= 2:
+            return host
+
+        # Keep 3 labels for domains like example.co.in
+        if parts[-2] == "co" and parts[-1] in {"in", "uk", "au", "nz", "jp"}:
+            return ".".join(parts[-3:])
+
+        return ".".join(parts[-2:])
+
+    @staticmethod
+    def _build_location_scope(
+        requested_location: Optional[str],
+        target_locations: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Build normalized location tokens including nearby-city variants."""
+        scope: Set[str] = set()
+
+        raw_locations = []
+        if requested_location:
+            raw_locations.append(str(requested_location))
+        if isinstance(target_locations, str):
+            if target_locations.strip():
+                raw_locations.append(target_locations)
+        else:
+            raw_locations.extend(str(loc) for loc in (target_locations or []) if str(loc).strip())
+
+        for raw in raw_locations:
+            lowered = str(raw).strip().lower()
+            if not lowered:
+                continue
+
+            normalized = _normalize_location_text(lowered)
+            for token in [lowered, normalized]:
+                if token:
+                    scope.add(token)
+                for part in [p.strip() for p in token.split(",") if p.strip()]:
+                    scope.add(part)
+
+            nearby = NEARBY_LOCATION_HINTS.get(normalized) or NEARBY_LOCATION_HINTS.get(lowered) or []
+            for near in nearby:
+                near_norm = _normalize_location_text(near)
+                if near_norm:
+                    scope.add(near_norm)
+
+        # Remove weak tokens that cause false positives.
+        return sorted([token for token in scope if len(token) >= 3])
+
+    @staticmethod
+    def _extract_location_hit(text: str, location_scope: List[str]) -> str:
+        """Return matched location token from text; empty string if no location hit."""
+        if not location_scope:
+            return ""
+
+        searchable = _normalize_location_text((text or "").lower())
+        if not searchable:
+            return ""
+
+        for token in location_scope:
+            pattern = rf"\b{re.escape(token)}\b"
+            if re.search(pattern, searchable):
+                return token
+
+        return ""
+
+    @staticmethod
+    def _lead_dedupe_key(lead: Lead) -> str:
+        """Build a stable dedupe key for result collapsing."""
+        raw = lead.raw_data or {}
+        domain = LeadService._canonical_domain(str(raw.get("source_url", "")))
+        if domain:
+            return f"domain:{domain}"
+
+        company = re.sub(r"\s+", " ", str(lead.company or lead.name or "").strip().lower())
+        if company:
+            return f"company:{company}"
+
+        return f"lead:{str(lead.id)}"
     
     @staticmethod
     def create_lead(lead: LeadCreate) -> Lead:
@@ -170,6 +286,7 @@ class LeadService:
         company_tech = company_profile.technologies if company_profile and company_profile.technologies else []
         company_expertise = company_profile.expertise_areas if company_profile and company_profile.expertise_areas else []
         target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
+        location_scope = self._build_location_scope(location, target_locations)
         context_keywords = [*company_services, *company_tech, *company_expertise]
 
         planner_meta: Dict[str, Any] = {
@@ -281,30 +398,29 @@ class LeadService:
         search_key = hashlib.md5(search_seed.encode("utf-8")).hexdigest()[:12]
 
         campaign = self._get_or_create_default_campaign(owner_id)
-        existing = Lead.objects(campaign_id=str(campaign.id))
+        from app.models.campaign import Campaign
+        owner_campaign_ids = [str(c.id) for c in Campaign.objects(owner_id=owner_id)]
+        existing = Lead.objects(campaign_id__in=owner_campaign_ids)
         existing_domain_keys = set()
         for lead in existing:
             source_url = (lead.raw_data or {}).get("source_url", "") if lead.raw_data else ""
-            existing_search_key = (lead.raw_data or {}).get("search_key", "") if lead.raw_data else ""
-            parsed = urlparse(source_url)
-            domain = (parsed.netloc or "").lower().replace("www.", "")
+            domain = self._canonical_domain(source_url)
             if domain:
-                key = f"{domain}|{existing_search_key or 'legacy'}"
-                existing_domain_keys.add(key)
+                existing_domain_keys.add(domain)
 
         created_count = 0
         skipped_duplicate = 0
         skipped_empty_domain = 0
         skipped_low_quality = 0
         skipped_no_signal = 0
+        skipped_location_mismatch = 0
         for item in discovered:
-            domain = (item.get("domain") or "").strip().lower().replace("www.", "")
+            domain = self._canonical_domain(item.get("domain") or item.get("url") or "")
             if not domain:
                 skipped_empty_domain += 1
                 continue
 
-            domain_search_key = f"{domain}|{search_key}"
-            if domain_search_key in existing_domain_keys:
+            if domain in existing_domain_keys:
                 skipped_duplicate += 1
                 continue
 
@@ -313,7 +429,29 @@ class LeadService:
             phone = ""
             snippet = (item.get("snippet") or "").lower()
 
+            # Enforce strict location scope (requested location + nearby aliases)
+            quick_location_text = " ".join(
+                [
+                    str(item.get("title", "")),
+                    str(item.get("snippet", "")),
+                    str(item.get("url", "")),
+                ]
+            )
+            detected_location = self._extract_location_hit(quick_location_text, location_scope)
+
             snapshot = await fetch_company_profile_snapshot(item.get("url", ""))
+            if location_scope and not detected_location:
+                detailed_location_text = " ".join(
+                    [
+                        quick_location_text,
+                        str(snapshot.get("summary", "")),
+                    ]
+                )
+                detected_location = self._extract_location_hit(detailed_location_text, location_scope)
+                if not detected_location:
+                    skipped_location_mismatch += 1
+                    continue
+
             if snapshot.get("company_name"):
                 company_name = snapshot["company_name"]
             if snapshot.get("email"):
@@ -429,9 +567,13 @@ class LeadService:
                     "source": "web_discovery",
                     "source_url": item.get("url", ""),
                     "company_website": item.get("url", ""),
+                    "title": item.get("title", ""),
                     "snippet": item.get("snippet", ""),
                     "query": query,
-                    "location": location,
+                    "location": detected_location or "",
+                    "detected_location": detected_location or "",
+                    "requested_location": location,
+                    "location_scope": location_scope,
                     "search_key": search_key,
                     "service_focus": service_focus or [],
                     "context_keyword_hits": list(set(keyword_hits)),
@@ -453,12 +595,13 @@ class LeadService:
             if company_profile:
                 await self.enrich_lead_profile(lead, company_profile)
 
-            existing_domain_keys.add(domain_search_key)
+            existing_domain_keys.add(domain)
             created_count += 1
 
         print(
             f"Lead discovery summary: owner={owner_id} created={created_count} "
             f"skipped_duplicate={skipped_duplicate} skipped_empty_domain={skipped_empty_domain} "
+            f"skipped_location_mismatch={skipped_location_mismatch} "
             f"skipped_low_quality={skipped_low_quality} skipped_no_signal={skipped_no_signal}"
         )
         return created_count
@@ -472,6 +615,7 @@ class LeadService:
         """Check whether lead satisfies current search constraints (location/industry/services/query)."""
         filters = filters or {}
         lead_raw = lead.raw_data or {}
+        source = str(lead_raw.get("source", "")).strip().lower()
 
         location = (filters.get("location") or "").strip().lower()
         industry = (filters.get("industry") or "").strip().lower()
@@ -483,13 +627,13 @@ class LeadService:
                 str(lead.company or ""),
                 str(lead.job_title or ""),
                 str(lead.industry or ""),
+                str(lead_raw.get("title", "")),
                 str(lead_raw.get("snippet", "")),
-                str(lead_raw.get("query", "")),
-                str(lead_raw.get("location", "")),
+                str(lead_raw.get("company_summary", "")),
+                str(lead_raw.get("detected_location", "")),
                 str(lead_raw.get("source_url", "")),
             ]
         ).lower()
-        normalized_location = _normalize_location_text(location) if location else ""
 
         source_url = str(lead_raw.get("source_url", "")).lower()
         quality_score = float(lead_raw.get("discovery_quality_score", 0.0) or 0.0)
@@ -503,13 +647,13 @@ class LeadService:
             return False
 
         # Enforce minimum quality for discovered web leads
-        if str(lead_raw.get("source", "")) == "web_discovery" and quality_score < 0.30:
+        if source == "web_discovery" and quality_score < 0.30:
             return False
 
         # Enforce high-intent business signal threshold (relaxed to show more leads)
-        if str(lead_raw.get("source", "")) == "web_discovery" and signal_confidence < 0.10:
+        if source == "web_discovery" and signal_confidence < 0.10:
             return False
-        if str(lead_raw.get("source", "")) == "web_discovery" and tech_relevance < 0.10:
+        if source == "web_discovery" and tech_relevance < 0.10:
             return False
 
         # Reject low-value headline/listing style leads
@@ -524,7 +668,23 @@ class LeadService:
             return False
 
         if location:
-            if location not in searchable and normalized_location and normalized_location not in searchable:
+            location_scope = LeadService._build_location_scope(
+                requested_location=location,
+                target_locations=filters.get("target_locations") or lead_raw.get("location_scope") or [],
+            )
+            location_text = " ".join(
+                [
+                    str(lead_raw.get("detected_location", "")),
+                    str(lead_raw.get("snippet", "")),
+                    str(lead_raw.get("company_summary", "")),
+                    str(lead_raw.get("source_url", "")),
+                    str(lead.company or ""),
+                ]
+            )
+            location_hit = LeadService._extract_location_hit(location_text, location_scope)
+            if source == "web_discovery" and not location_hit:
+                return False
+            if source != "web_discovery" and not location_hit and location not in searchable:
                 return False
 
         if services:
@@ -767,10 +927,17 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             all_leads = all_leads(status=filters["status"])
         
         # Score each lead with company fit
-        scored_leads = []
+        scored_leads: List[Tuple[Lead, float]] = []
+        scored_best_by_key: Dict[str, Tuple[Lead, float]] = {}
         skipped_constraints = 0
         skipped_low_score = 0
         skipped_no_signals = 0
+        skipped_low_relevance = 0
+        collapsed_duplicates = 0
+
+        filter_location = (filters or {}).get("location") if filters else None
+        profile_target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
+        location_scope = self._build_location_scope(filter_location, profile_target_locations)
         
         for lead in all_leads:
             if not self._lead_matches_search_constraints(lead, query, filters):
@@ -813,17 +980,17 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             lead_raw = lead.raw_data or {}
             signal_strength = float(lead.signal_score or lead_raw.get("signal_confidence", 0.0) or 0.0)
             location_match = 0.0
-            filter_location = (filters or {}).get("location") if filters else None
-            if filter_location:
-                loc = str(filter_location).strip().lower()
-                loc_norm = _normalize_location_text(loc)
-                searchable = " ".join([
-                    str(lead.company or ""),
-                    str(lead_raw.get("snippet", "")),
-                    str(lead_raw.get("location", "")),
-                    str(lead_raw.get("source_url", "")),
-                ]).lower()
-                if loc in searchable or (loc_norm and loc_norm in searchable):
+            if location_scope:
+                location_text = " ".join(
+                    [
+                        str(lead_raw.get("detected_location", "")),
+                        str(lead_raw.get("snippet", "")),
+                        str(lead_raw.get("company_summary", "")),
+                        str(lead_raw.get("source_url", "")),
+                        str(lead.company or ""),
+                    ]
+                )
+                if self._extract_location_hit(location_text, location_scope):
                     location_match = 1.0
             
             # Combined score: company fit + signal score + location
@@ -835,21 +1002,19 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             elif sort_by == "created_at":
                 final_score = lead.created_at.timestamp() if lead.created_at else 0.0
             elif sort_by == "combined":
-                # NEW FORMULA: Prioritize company profile fit over query match
-                # company_fit (60%) > signal_strength (30%) > location (10%)
+                # Prioritize fit and query relevance, then intent signals and location evidence.
                 if company_fit_score > 0:
-                    # Use company profile embeddings as primary
                     final_score = (
-                        company_fit_score * 0.60 +
-                        signal_strength * 0.30 +
+                        company_fit_score * 0.50 +
+                        query_score * 0.20 +
+                        signal_strength * 0.20 +
                         location_match * 0.10
                     )
                 else:
-                    # Fallback if company profile embeddings not available
                     final_score = (
-                        query_score * 0.40 +
-                        signal_strength * 0.50 +
-                        location_match * 0.10
+                        query_score * 0.55 +
+                        signal_strength * 0.25 +
+                        location_match * 0.20
                     )
             else:
                 final_score = 0.0
@@ -860,8 +1025,13 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 skipped_no_signals += 1
                 continue
 
-            # Drop very low-confidence results (minimum 0.35 for acceptable company fit or signals)
-            if sort_by == "combined" and final_score < 0.35:
+            # Require at least moderate semantic relevance to company profile or search intent.
+            if sort_by == "combined" and max(company_fit_score, query_score) < 0.28:
+                skipped_low_relevance += 1
+                continue
+
+            # Drop low-confidence results after location and relevance constraints.
+            if sort_by == "combined" and final_score < 0.45:
                 skipped_low_score += 1
                 continue
 
@@ -879,6 +1049,14 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             if not reason:
                 reason.append("Qualified by company profile matching")
 
+            dedupe_key = self._lead_dedupe_key(lead)
+            best = scored_best_by_key.get(dedupe_key)
+            if best and best[1] >= final_score:
+                collapsed_duplicates += 1
+                continue
+            if best and best[1] < final_score:
+                collapsed_duplicates += 1
+
             lead.raw_data = lead.raw_data or {}
             lead.raw_data["final_reason"] = reason
             lead.raw_data["final_score"] = final_score
@@ -887,21 +1065,22 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             lead.raw_data["location_match"] = location_match
             lead.raw_data["signal_strength"] = signal_strength
             lead.save()
-            
-            # Debug logging to see what scores are being calculated
+
             if company_fit_score > 0 or query_score > 0:
                 print(f"[LEAD SCORING] {lead.company or 'unknown'}: final={final_score:.2f} | company_fit={company_fit_score:.2f} | query={query_score:.2f} | signal={signal_strength:.2f}")
-            
-            scored_leads.append((lead, final_score))
+
+            scored_best_by_key[dedupe_key] = (lead, final_score)
         
-        # Sort by score descending
+        scored_leads = list(scored_best_by_key.values())
         scored_leads.sort(key=lambda x: x[1], reverse=True)
         
         print(f"Lead scoring summary: "
               f"total_candidates={all_leads.count()} "
               f"skipped_constraints={skipped_constraints} "
               f"skipped_no_signals={skipped_no_signals} "
+              f"skipped_low_relevance={skipped_low_relevance} "
               f"skipped_low_score={skipped_low_score} "
+              f"collapsed_duplicates={collapsed_duplicates} "
               f"scored={len(scored_leads)} "
               f"returning_top_k={min(top_k, len(scored_leads))}")
         

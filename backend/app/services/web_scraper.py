@@ -312,10 +312,13 @@ async def _fetch_html(
                     continue
                 
                 if response.status == 403:  # Forbidden - might be anti-bot
-                    wait_time = base_delay * (2 ** attempt)
-                    print(f"Forbidden (403) for {normalized}. Waiting {wait_time:.2f}s before retry...")
-                    await asyncio.sleep(wait_time)
-                    continue
+                    if attempt == 0:
+                        wait_time = base_delay * (2 ** attempt)
+                        print(f"Forbidden (403) for {normalized}. Waiting {wait_time:.2f}s before retry...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    print(f"Forbidden (403) for {normalized}. Skipping further retries.")
+                    return None
                 
                 if response.status == 503:  # Service Unavailable
                     wait_time = base_delay * (2 ** attempt)
@@ -342,6 +345,20 @@ async def _fetch_html(
                 await asyncio.sleep(wait_time)
                 continue
             else:
+                if normalized.startswith("https://"):
+                    fallback_http = "http://" + normalized[len("https://"):]
+                    try:
+                        async with session.get(
+                            fallback_http,
+                            timeout=timeout_cfg,
+                            headers=headers,
+                            allow_redirects=True,
+                        ) as fallback_response:
+                            if 200 <= fallback_response.status < 400:
+                                print(f"Recovered via HTTP fallback for {normalized}")
+                                return await fallback_response.text(errors="ignore")
+                    except Exception:
+                        pass
                 print(f"SSL error on final attempt for {normalized}")
                 return None
         
@@ -803,6 +820,7 @@ def _append_candidate_result(
     results.append(
         {
             "name": company_name[:120],
+            "title": (title or "")[:180],
             "url": canonical_url,
             "domain": domain,
             "snippet": (snippet or "")[:300],
@@ -1209,16 +1227,16 @@ async def discover_company_websites(
         for idx, q in enumerate(generated_queries[:5], 1):
             print(f"[QUERY GENERATION: LLM] Query {idx}: {q}")
 
-    # Build deterministic fallback only when LLM did not provide enough unique queries.
+    # Build deterministic fallback only when LLM planning returned too few usable queries.
     heuristic_queries: List[str] = []
-    if len(generated_queries) < 8:
+    if len(generated_queries) < 5:
         heuristic_queries = generate_high_intent_queries(
             query=query_text,
             location=location,
             industry=industry,
             service_focus=service_focus,
-            min_queries=8,
-            max_queries=10,
+            min_queries=4,
+            max_queries=6,
             log_prefix="[QUERY GENERATION: HEURISTIC]",
         )
         print(
@@ -1236,7 +1254,7 @@ async def discover_company_websites(
             break
 
     query_source = "LLM" if planned_queries else "HEURISTIC"
-    if planned_queries and len(generated_queries) < 8:
+    if planned_queries and len(generated_queries) < 5:
         query_source = "LLM+HEURISTIC"
     print(
         f"[QUERY GENERATION: FINAL] source={query_source} "
