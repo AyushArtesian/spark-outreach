@@ -9,8 +9,62 @@ import { useNavigate } from "react-router-dom";
 import { leadsAPI } from "@/services/api";
 import { toast } from "@/hooks/use-toast";
 
-const serviceOptions = ["Web Development", "Mobile App Development", "Cloud Migration", "AI/ML Development", "DevOps Consulting", "Data Engineering", "UI/UX Design", "Cybersecurity"];
-const industryFilters = ["All", "SaaS", "FinTech", "Healthcare", "E-commerce", "EdTech", "Real Estate"];
+const serviceOptions = [
+  // Software Development
+  "Web App Development",
+  "Mobile App Development",
+  "eCommerce Web Development",
+  "eCommerce App Development",
+  "Product Development",
+  "MVP Development",
+  "Microsoft MAUI",
+  "Salesforce Development",
+  
+  // Power Platform Services
+  "Business Application Development",
+  "Microsoft Power Pages",
+  "Microsoft Power Apps",
+  "Microsoft Power Automate",
+  "Microsoft Power BI",
+  "Microsoft Copilot Studio",
+  "Microsoft Fabric",
+  
+  // Digital Transformation
+  "Digital Transformation",
+  "Power Platform Adoption",
+  
+  // Cloud Consulting
+  "Azure Consulting",
+  "DevOps Consulting & Engineering",
+  "Cloud Migration",
+  
+  // Migrations
+  "InfoPath to Power Apps",
+  
+  // Microsoft Dynamics 365
+  "Microsoft Dynamics 365",
+  
+  // Additional services
+  "Data Engineering",
+  "UI/UX Design",
+  "Cybersecurity",
+  "AI/ML Development",
+];
+
+const industryFilters = [
+  "All",
+  "Automotive",
+  "Healthcare",
+  "Financial",
+  "Internet of Things",
+  "eCommerce",
+  "Auction Software",
+  "SaaS",
+  "FinTech",
+  "EdTech",
+  "Real Estate",
+];
+
 const companySizes = ["1-10", "11-50", "51-200", "200-1000", "1000+"];
 
 const processingSteps = [

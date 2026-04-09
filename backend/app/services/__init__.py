@@ -4,6 +4,7 @@ from app.services.lead_service import lead_service, LeadService
 from app.services.query_scorer import (
     extract_intent_signals,
     score_query_intent,
+    score_query_specificity,
     rank_high_intent_queries,
     estimate_search_effectiveness,
     has_unrealistic_operators,
@@ -18,6 +19,7 @@ __all__ = [
     # Query Scoring & Generation
     "extract_intent_signals",
     "score_query_intent",
+    "score_query_specificity",
     "rank_high_intent_queries",
     "estimate_search_effectiveness",
     "has_unrealistic_operators",

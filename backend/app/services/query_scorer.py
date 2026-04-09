@@ -196,6 +196,66 @@ def score_query_intent(query: str, location_hint: Optional[str] = None) -> float
     return max(0.0, min(1.0, score))
 
 
+def score_query_specificity(query: str) -> float:
+    """
+    Score query for narrowness/specificity (0-1 scale).
+    More specific queries = fewer results = better ICP match.
+    
+    Factors:
+    - Length: 10-15 words = specific, <5 words = generic
+    - Location included: +0.15
+    - Multiple constraints (operator + phrases): +0.10 each
+    - Industry/vertical keywords: +0.10 per keyword
+    - Company-context keywords (e.g., "power platform", "cloud", "modern"): +0.10 per keyword
+    """
+    text = (query or "").lower()
+    if not text:
+        return 0.0
+    
+    score = 0.0
+    word_count = len(text.split())
+    
+    # Length score: 10-15 words is optimal, penalize too short/long
+    if 10 <= word_count <= 15:
+        score += 0.30  # Perfect specificity range
+    elif 8 <= word_count < 10:
+        score += 0.20  # Good
+    elif 5 <= word_count < 8:
+        score += 0.10  # Acceptable
+    elif word_count < 5:
+        score -= 0.20  # Too vague
+    else:  # >15 words
+        score += 0.15  # More specific but maybe too wordy
+    
+    # Constraint count (more constraints = narrower results)
+    constraint_count = 0
+    if "intitle:" in text or "inurl:" in text:
+        constraint_count += 1
+    if '"' in text:  # Phrase search
+        constraint_count += 1
+    if "site:" in text:
+        constraint_count += 1
+    
+    score += 0.10 * min(constraint_count, 3)  # Cap at 3
+    
+    # Industry/vertical keywords (shows context awareness)
+    verticals = [
+        "saas", "fintech", "ecommerce", "healthtech", "insurtech",
+        "edtech", "real estate", "logistics", "manufacturing",
+        "microsoft", "azure", "power platform", "sharepoint",
+        "cloud", "legacy", "modernization", "migration",
+    ]
+    vertical_count = sum(1 for v in verticals if v in text)
+    score += 0.05 * min(vertical_count, 3)  # Cap at 3
+    
+    # Growth stage keywords (early signal)
+    growth_signals = ["series a", "series b", "series c", "seed", "growth stage", "scaling"]
+    growth_count = sum(1 for g in growth_signals if g in text)
+    score += 0.05 * min(growth_count, 2)
+    
+    return max(0.0, min(1.0, score))
+
+
 def rank_high_intent_queries(
     queries: List[str],
     location_hint: Optional[str],
@@ -203,21 +263,34 @@ def rank_high_intent_queries(
     min_score: float = 0.50,
 ) -> List[QueryScore]:
     """
-    Rank queries by intent score and drop weak generic ones.
-    Default min_score=0.50 enforces quality.
+    Rank queries by COMBINED intent + specificity scores.
+    Preference: Specific + high-intent queries over broad generic ones.
     
-    Returns list of QueryScore objects sorted by score descending.
+    Scoring: 70% intent + 30% specificity
+    - Intent: Does it have buying signals?
+    - Specificity: Is it narrow/contextual enough to find exact ICPs?
+    
+    Returns list of QueryScore objects sorted by combined score descending.
     """
     ranked = []
     for query in queries:
-        score = score_query_intent(query, location_hint=location_hint)
+        intent_score = score_query_intent(query, location_hint=location_hint)
+        specificity_score = score_query_specificity(query)
+        
+        # Combine: Intent (70%) weighted higher than specificity (30%)
+        # But both must contribute - don't want generic intent or overly narrow vague queries
+        combined_score = (intent_score * 0.70) + (specificity_score * 0.30)
+        
         signals = extract_intent_signals(query)
-        if score < min_score:
+        
+        # Higher threshold than before: need both quality AND specificity
+        if combined_score < min_score:
             continue
+        
         ranked.append(
             QueryScore(
                 query=query,
-                score=round(score, 3),
+                score=round(combined_score, 3),
                 signals=signals,
             )
         )
