@@ -10,6 +10,7 @@ const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
   { icon: Building2, label: "Setup Profile", path: "/company-setup" },
   { icon: Search, label: "Search Leads", path: "/search" },
+  { icon: Users, label: "All Leads", path: "/all-leads" },
   { icon: Users, label: "Leads", path: "/leads" },
   { icon: Settings, label: "Settings", path: "/settings" },
 ];

@@ -28,11 +28,20 @@ class LeadUpdate(BaseModel):
     status: Optional[str] = None
     ai_notes: Optional[str] = None
 
-class LeadResponse(LeadBase):
+class LeadResponse(BaseModel):
     id: str
     campaign_id: str
+    name: str
+    email: str  # Changed to str to allow sanitized/empty values
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    job_title: Optional[str] = None
+    industry: Optional[str] = None
     status: str
-    relevance_score: Optional[float]
+    relevance_score: Optional[float] = None
+    company_fit_score: Optional[float] = 0.0
+    signal_score: Optional[float] = 0.0
+    signal_keywords: Optional[list[str]] = []
     message_sent: bool
     opened: bool
     clicked: bool

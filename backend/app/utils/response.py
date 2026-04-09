@@ -55,19 +55,48 @@ def serialize_campaign(campaign) -> Dict[str, Any]:
     }
 
 
+def _sanitize_email(email: str) -> str:
+    """Extract valid email from malformed/URL strings like 'http://info@rubixtech.in'"""
+    if not email:
+        return ""
+    
+    email = str(email).strip()
+    
+    # Remove common URL prefixes
+    for prefix in ["http://", "https://", "www."]:
+        if email.startswith(prefix):
+            email = email[len(prefix):]
+    
+    # If there's a slash, get the part before it
+    if "/" in email:
+        email = email.split("/")[0]
+    
+    # Validate basic email format
+    if "@" in email and "." in email.split("@")[-1]:
+        return email
+    
+    return ""
+
+
 def serialize_lead(lead) -> Dict[str, Any]:
     """Serialize a Lead MongoEngine document to dict with string IDs"""
+    # Sanitize email to ensure it's valid
+    email = _sanitize_email(lead.email)
+    
     return {
         "id": str(lead.id),
         "campaign_id": str(lead.campaign_id),
         "name": lead.name,
-        "email": lead.email,
+        "email": email,
         "company": lead.company,
         "phone": lead.phone,
         "job_title": lead.job_title,
         "industry": lead.industry,
         "status": lead.status,
         "relevance_score": lead.relevance_score,
+        "company_fit_score": float(lead.company_fit_score or 0.0),
+        "signal_score": float(lead.signal_score or 0.0),
+        "signal_keywords": lead.signal_keywords or [],
         "message_sent": lead.message_sent,
         "opened": lead.opened,
         "clicked": lead.clicked,
