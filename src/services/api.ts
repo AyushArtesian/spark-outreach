@@ -197,6 +197,12 @@ export const leadsAPI = {
       requiresAuth: true,
     });
   },
+
+  all: async (skip = 0, limit = 200, status?: string) => {
+    let url = `/leads/all?skip=${skip}&limit=${limit}`;
+    if (status) url += `&status=${encodeURIComponent(status)}`;
+    return apiCall(url, { requiresAuth: true });
+  },
 };
 
 // AI API

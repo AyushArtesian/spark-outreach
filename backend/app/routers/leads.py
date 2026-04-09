@@ -34,6 +34,8 @@ class LeadSearchResult(BaseModel):
     industry: Optional[str]
     source_url: Optional[str] = None
     company_summary: Optional[str] = None
+    source: Optional[str] = None
+    detected_location: Optional[str] = None
     score: float = 0.0
     signals: List[str] = Field(default_factory=list)
     reason: List[str] = Field(default_factory=list)
@@ -126,6 +128,8 @@ async def search_leads(
                 industry=lead.industry,
                 source_url=lead_raw.get("source_url") or lead_raw.get("company_website"),
                 company_summary=lead_raw.get("company_summary"),
+                source=lead_raw.get("source"),
+                detected_location=lead_raw.get("detected_location") or lead_raw.get("location"),
                 score=score_10,
                 signals=signals,
                 reason=lead_raw.get("final_reason", []),
@@ -210,6 +214,55 @@ async def create_bulk_leads(
     
     return [serialize_lead(lead) for lead in db_leads]
 
+@router.get("/all", response_model=List[LeadResponse])
+async def get_all_leads(
+    skip: int = 0,
+    limit: int = 200,
+    status: Optional[str] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """Get all leads for the current authenticated user"""
+    current_user = get_current_user_from_token(authorization)
+    from app.models.campaign import Campaign
+
+    user_campaigns = Campaign.objects(owner_id=str(current_user.id))
+    campaign_ids = [str(c.id) for c in user_campaigns]
+    if not campaign_ids:
+        return []
+
+    if status:
+        leads = Lead.objects(campaign_id__in=campaign_ids, status=status).skip(skip).limit(limit)
+    else:
+        leads = Lead.objects(campaign_id__in=campaign_ids).skip(skip).limit(limit)
+
+    return [serialize_lead(l) for l in leads]
+
+@router.get("/campaign/{campaign_id}", response_model=List[LeadResponse])
+async def get_campaign_leads(
+    campaign_id: str,
+    skip: int = 0,
+    limit: int = 100,
+    status: str = None,
+    authorization: Optional[str] = Header(None)
+):
+    """Get all leads for a campaign"""
+    current_user = get_current_user_from_token(authorization)
+    
+    campaign = Campaign.objects(id=campaign_id).first()
+    
+    if not campaign or str(campaign.owner_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found"
+        )
+    
+    if status:
+        leads = lead_service.get_leads_by_status(campaign_id, status)
+    else:
+        leads = lead_service.get_campaign_leads(campaign_id, skip, limit)
+    
+    return [serialize_lead(l) for l in leads]
+
 @router.get("/{lead_id}", response_model=LeadDetailResponse)
 async def get_lead(
     lead_id: str,
@@ -252,32 +305,6 @@ async def get_lead(
         "replied_at": lead.replied_at,
     })
     return serialized
-
-@router.get("/campaign/{campaign_id}", response_model=List[LeadResponse])
-async def get_campaign_leads(
-    campaign_id: str,
-    skip: int = 0,
-    limit: int = 100,
-    status: str = None,
-    authorization: Optional[str] = Header(None)
-):
-    """Get all leads for a campaign"""
-    current_user = get_current_user_from_token(authorization)
-    
-    campaign = Campaign.objects(id=campaign_id).first()
-    
-    if not campaign or str(campaign.owner_id) != str(current_user.id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Campaign not found"
-        )
-    
-    if status:
-        leads = lead_service.get_leads_by_status(campaign_id, status)
-    else:
-        leads = lead_service.get_campaign_leads(campaign_id, skip, limit)
-    
-    return [serialize_lead(l) for l in leads]
 
 @router.put("/{lead_id}", response_model=LeadResponse)
 async def update_lead(

@@ -7,6 +7,7 @@ from app.models.company import CompanyProfile
 from app.schemas.lead import LeadCreate, LeadUpdate
 from app.utils.embeddings import embedding_service
 from app.services.web_scraper import _normalize_location_text, analyze_business_signals
+from app.services.apollo_service import apollo_service
 from datetime import datetime
 from bson import ObjectId
 from urllib.parse import urlparse
@@ -281,6 +282,7 @@ class LeadService:
                     industry = industry_name
                     break
         service_focus = filters.get("services") if filters else None
+        company_sizes = filters.get("company_sizes") if filters else None
 
         company_services = company_profile.services if company_profile and company_profile.services else []
         company_tech = company_profile.technologies if company_profile and company_profile.technologies else []
@@ -379,15 +381,53 @@ class LeadService:
         if not planned_queries:
             print("[LEAD QUERY PLANNER] Using heuristic query generation fallback.")
 
-        discovered = await discover_company_websites(
-            query=query,
-            location=location,
-            industry=industry,
-            service_focus=service_focus or company_services,
-            target_locations=target_locations,
-            context_keywords=context_keywords,
-            planned_queries=planned_queries,
-            max_results=max_results,
+        apollo_discovered: List[Dict[str, Any]] = []
+        if apollo_service.enabled:
+            try:
+                apollo_discovered = await apollo_service.search_people(
+                    query=query,
+                    location=location,
+                    industry=industry,
+                    service_focus=service_focus or company_services,
+                    company_sizes=company_sizes,
+                    max_results=max_results,
+                )
+            except Exception as e:
+                print(f"[APOLLO] Discovery failed: {e}")
+        else:
+            print("[APOLLO] APOLLO_API_KEY missing; skipping Apollo people discovery.")
+
+        web_discovered: List[Dict[str, Any]] = []
+        apollo_only_mode = bool(apollo_service.enabled)
+        if apollo_only_mode:
+            if apollo_discovered:
+                print(
+                    "[LEAD DISCOVERY SOURCES] "
+                    "Apollo-only mode active. Skipping SerpAPI fallback."
+                )
+            else:
+                print(
+                    "[LEAD DISCOVERY SOURCES] "
+                    "Apollo-only mode active but Apollo returned 0 results. "
+                    "Skipping SerpAPI fallback by request."
+                )
+        else:
+            web_limit = max(5, int(max_results))
+            web_discovered = await discover_company_websites(
+                query=query,
+                location=location,
+                industry=industry,
+                service_focus=service_focus or company_services,
+                target_locations=target_locations,
+                context_keywords=context_keywords,
+                planned_queries=planned_queries,
+                max_results=web_limit,
+            )
+
+        discovered = apollo_discovered if apollo_only_mode else web_discovered
+        print(
+            "[LEAD DISCOVERY SOURCES] "
+            f"apollo={len(apollo_discovered)} web={len(web_discovered)} total_candidates={len(discovered)}"
         )
         if not discovered:
             return 0
@@ -402,11 +442,18 @@ class LeadService:
         owner_campaign_ids = [str(c.id) for c in Campaign.objects(owner_id=owner_id)]
         existing = Lead.objects(campaign_id__in=owner_campaign_ids)
         existing_domain_keys = set()
+        existing_contact_keys = set()
         for lead in existing:
             source_url = (lead.raw_data or {}).get("source_url", "") if lead.raw_data else ""
             domain = self._canonical_domain(source_url)
             if domain:
                 existing_domain_keys.add(domain)
+            email_key = str(lead.email or "").strip().lower()
+            if email_key:
+                existing_contact_keys.add(email_key)
+            apollo_person_id = str((lead.raw_data or {}).get("apollo_person_id", "") or "").strip()
+            if apollo_person_id:
+                existing_contact_keys.add(f"apollo:{apollo_person_id}")
 
         created_count = 0
         skipped_duplicate = 0
@@ -415,18 +462,29 @@ class LeadService:
         skipped_no_signal = 0
         skipped_location_mismatch = 0
         for item in discovered:
+            item_source = str(item.get("source") or "web_discovery").strip().lower()
             domain = self._canonical_domain(item.get("domain") or item.get("url") or "")
-            if not domain:
+            apollo_person_id = str(item.get("apollo_person_id") or "").strip()
+            item_email = str(item.get("email") or "").strip().lower()
+            contact_key = item_email if item_email else (f"apollo:{apollo_person_id}" if apollo_person_id else "")
+
+            if not domain and not contact_key:
                 skipped_empty_domain += 1
                 continue
 
-            if domain in existing_domain_keys:
+            if domain and domain in existing_domain_keys:
+                skipped_duplicate += 1
+                continue
+            if contact_key and contact_key in existing_contact_keys:
                 skipped_duplicate += 1
                 continue
 
-            company_name = (item.get("name") or domain.split(".")[0].title()).strip()
-            email = f"contact@{domain}"
-            phone = ""
+            company_name = (
+                str(item.get("company") or item.get("name") or (domain.split(".")[0].title() if domain else "Unknown"))
+            ).strip()
+            lead_name = str(item.get("name") or company_name).strip()
+            email = item_email or (f"contact@{domain}" if domain else f"unknown+{apollo_person_id[:8] or 'lead'}@apollo.local")
+            phone = str(item.get("phone") or "").strip()
             snippet = (item.get("snippet") or "").lower()
 
             # Enforce strict location scope (requested location + nearby aliases)
@@ -434,12 +492,30 @@ class LeadService:
                 [
                     str(item.get("title", "")),
                     str(item.get("snippet", "")),
+                    str(item.get("location", "")),
+                    str(item.get("company", "")),
                     str(item.get("url", "")),
                 ]
             )
             detected_location = self._extract_location_hit(quick_location_text, location_scope)
 
-            snapshot = await fetch_company_profile_snapshot(item.get("url", ""))
+            # Apollo already applies organization/person location filters at source.
+            # If Apollo result omits explicit city fields, retain requested city as inferred match.
+            if item_source.startswith("apollo") and location_scope and not detected_location:
+                inferred = _normalize_location_text(str(location or "").strip().lower())
+                if inferred and inferred in location_scope:
+                    detected_location = inferred
+
+            if item_source.startswith("apollo"):
+                snapshot = {
+                    "company_name": str(item.get("company") or company_name),
+                    "email": item_email,
+                    "phone": phone,
+                    "summary": str(item.get("snippet") or ""),
+                }
+            else:
+                snapshot = await fetch_company_profile_snapshot(item.get("url", ""))
+
             if location_scope and not detected_location:
                 detailed_location_text = " ".join(
                     [
@@ -472,7 +548,7 @@ class LeadService:
                 continue
 
             website_text = summary_text
-            if len(website_text) < 180:
+            if not item_source.startswith("apollo") and len(website_text) < 180:
                 extra_context = await fetch_company_website_context(item.get("url", ""))
                 if extra_context:
                     website_text = f"{website_text} {extra_context}".strip()
@@ -488,13 +564,26 @@ class LeadService:
             signal_reasons = list(signal_layer.get("reason", []))
             tech_relevance = float(signal_layer.get("tech_relevance", 0.0) or 0.0)
 
-            if signal_confidence < 0.18 and tech_relevance < 0.18:
+            min_signal_gate = 0.12 if item_source.startswith("apollo") else 0.18
+            if signal_confidence < min_signal_gate and tech_relevance < min_signal_gate:
                 skipped_no_signal += 1
-                print(f"Skipping {domain}: signal_confidence={signal_confidence:.2f}, tech_relevance={tech_relevance:.2f}, signals={signal_keywords}")
+                print(
+                    f"Skipping {domain or contact_key}: "
+                    f"signal_confidence={signal_confidence:.2f}, tech_relevance={tech_relevance:.2f}, "
+                    f"signals={signal_keywords}"
+                )
                 continue
 
             # Quality scoring to keep only profile-like company leads
             quality_score = 0.0
+            if item_source.startswith("apollo"):
+                quality_score += 0.25
+            if apollo_person_id:
+                quality_score += 0.10
+            if str(item.get("job_title") or "").strip():
+                quality_score += 0.12
+            if str(item.get("linkedin_url") or "").strip():
+                quality_score += 0.08
             if snapshot.get("company_name") and len(snapshot.get("company_name", "")) > 3:
                 quality_score += 0.35
             if snapshot.get("email"):
@@ -521,7 +610,9 @@ class LeadService:
 
             quality_score = max(0.0, min(1.0, quality_score))
             has_snapshot = bool(snapshot.get("email") or snapshot.get("phone") or snapshot.get("summary"))
-            min_quality = 0.45 if has_snapshot else 0.35
+            min_quality = 0.40 if has_snapshot else 0.32
+            if item_source.startswith("apollo"):
+                min_quality = 0.36
             if quality_score < min_quality:
                 # Allow only moderate exceptions when strong business signals are present.
                 if not has_snapshot and quality_score >= 0.26 and signal_confidence >= 0.45:
@@ -554,17 +645,21 @@ class LeadService:
 
             lead = Lead(
                 campaign_id=str(campaign.id),
-                name=company_name,
+                name=lead_name,
                 email=email,
                 company=company_name,
                 phone=phone,
-                job_title="Hiring Team",
-                industry=industry if industry and str(industry).lower() != "all" else None,
+                job_title=str(item.get("job_title") or "Hiring Team"),
+                industry=(
+                    str(item.get("industry") or industry)
+                    if (item.get("industry") or (industry and str(industry).lower() != "all"))
+                    else None
+                ),
                 status="new",
                 signal_keywords=signal_keywords,
                 signal_score=signal_confidence,
                 raw_data={
-                    "source": "web_discovery",
+                    "source": item_source,
                     "source_url": item.get("url", ""),
                     "company_website": item.get("url", ""),
                     "title": item.get("title", ""),
@@ -588,6 +683,10 @@ class LeadService:
                     "signal_confidence": signal_confidence,
                     "signal_reasons": signal_reasons,
                     "tech_relevance": tech_relevance,
+                    "apollo_person_id": apollo_person_id,
+                    "apollo_organization_id": str(item.get("apollo_organization_id") or ""),
+                    "apollo_email_status": str(item.get("email_status") or ""),
+                    "apollo_linkedin_url": str(item.get("linkedin_url") or ""),
                 },
             )
             lead.save()
@@ -595,7 +694,10 @@ class LeadService:
             if company_profile:
                 await self.enrich_lead_profile(lead, company_profile)
 
-            existing_domain_keys.add(domain)
+            if domain:
+                existing_domain_keys.add(domain)
+            if contact_key:
+                existing_contact_keys.add(contact_key)
             created_count += 1
 
         print(
@@ -935,6 +1037,10 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         skipped_low_relevance = 0
         collapsed_duplicates = 0
 
+        apollo_only_mode = bool(apollo_service.enabled)
+        if apollo_only_mode:
+            print("[LEAD SCORING] Apollo-only mode active. Filtering out non-Apollo stored leads.")
+
         filter_location = (filters or {}).get("location") if filters else None
         profile_target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
         location_scope = self._build_location_scope(filter_location, profile_target_locations)
@@ -978,6 +1084,12 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                     query_score = 0.0
 
             lead_raw = lead.raw_data or {}
+            source_name = str(lead_raw.get("source", "")).strip().lower()
+
+            if apollo_only_mode and not source_name.startswith("apollo"):
+                skipped_constraints += 1
+                continue
+
             signal_strength = float(lead.signal_score or lead_raw.get("signal_confidence", 0.0) or 0.0)
             location_match = 0.0
             if location_scope:
@@ -1019,19 +1131,34 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             else:
                 final_score = 0.0
 
+            # Apollo records with validated contact fields get a small quality lift.
+            if source_name.startswith("apollo"):
+                contact_bonus = 0.0
+                email_val = str(lead.email or "").strip().lower()
+                if email_val and not email_val.endswith("@apollo.local"):
+                    contact_bonus += 0.08
+                if str(lead.phone or "").strip():
+                    contact_bonus += 0.05
+                if str(lead_raw.get("apollo_person_id", "")).strip():
+                    contact_bonus += 0.04
+                final_score = min(1.0, final_score + contact_bonus)
+
             signal_keywords = lead.signal_keywords or lead_raw.get("discovery_signals", []) or []
             # Relaxed thresholds to show more discovered leads
-            if sort_by == "combined" and signal_strength < 0.18 and len(signal_keywords) == 0:
+            min_signal_threshold = 0.10 if source_name.startswith("apollo") else 0.18
+            if sort_by == "combined" and signal_strength < min_signal_threshold and len(signal_keywords) == 0:
                 skipped_no_signals += 1
                 continue
 
             # Require at least moderate semantic relevance to company profile or search intent.
-            if sort_by == "combined" and max(company_fit_score, query_score) < 0.28:
+            min_relevance = 0.24 if source_name.startswith("apollo") else 0.28
+            if sort_by == "combined" and max(company_fit_score, query_score) < min_relevance:
                 skipped_low_relevance += 1
                 continue
 
             # Drop low-confidence results after location and relevance constraints.
-            if sort_by == "combined" and final_score < 0.45:
+            min_final = 0.42 if source_name.startswith("apollo") else 0.45
+            if sort_by == "combined" and final_score < min_final:
                 skipped_low_score += 1
                 continue
 
@@ -1046,6 +1173,8 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 reason.append("Matches target location")
             if query_score >= 0.50:
                 reason.append(f"Relevant to search query ({query_score:.0%})")
+            if source_name.startswith("apollo") and str(lead_raw.get("apollo_person_id", "")).strip():
+                reason.append("Apollo contact match")
             if not reason:
                 reason.append("Qualified by company profile matching")
 

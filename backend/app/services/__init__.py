@@ -11,6 +11,7 @@ from app.services.query_scorer import (
 )
 from app.services.query_generator import build_high_intent_fallback_queries
 from app.services.llm_provider import groq_provider
+from app.services.apollo_service import apollo_service, ApolloService
 
 __all__ = [
     # AI Service
@@ -25,6 +26,8 @@ __all__ = [
     "has_unrealistic_operators",
     "build_high_intent_fallback_queries",
     "groq_provider",
+    "apollo_service",
+    "ApolloService",
     # Campaign & Lead Services
     "campaign_service",
     "CampaignService",

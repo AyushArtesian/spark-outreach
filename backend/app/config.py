@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-1.5-flash"
     GROQ_API_KEY: Optional[str] = None
     GROQ_MODEL: str = "qwen/qwen3-32b"
+
+    # Apollo API
+    APOLLO_API_KEY: Optional[str] = None
+    APOLLO_BASE_URL: str = "https://api.apollo.io/api/v1"
+    APOLLO_MAX_PAGES: int = 2
+    APOLLO_ENRICHMENT_ENABLED: bool = True
+    APOLLO_ENRICHMENT_MAX_PEOPLE: int = 20
     
     # OpenAI API (optional, for future use)
     OPENAI_API_KEY: Optional[str] = None

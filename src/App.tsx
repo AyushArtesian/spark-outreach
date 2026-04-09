@@ -12,6 +12,7 @@ import LeadDashboard from "./pages/LeadDashboard";
 import CompanySetup from "./pages/CompanySetup";
 import LeadSearch from "./pages/LeadSearch";
 import LeadResults from "./pages/LeadResults";
+import AllLeads from "./pages/AllLeads";
 import LeadDetail from "./pages/LeadDetail";
 import SettingsPage from "./pages/Settings";
 import LoginPage from "./pages/Login";
@@ -49,6 +50,7 @@ const AppRoutes = () => (
       <Route path="/dashboard" element={<LeadDashboard />} />
       <Route path="/company-setup" element={<CompanySetup />} />
       <Route path="/search" element={<LeadSearch />} />
+      <Route path="/all-leads" element={<AllLeads />} />
       <Route path="/leads" element={<LeadResults />} />
       <Route path="/lead/:id" element={<LeadDetail />} />
       <Route path="/settings" element={<SettingsPage />} />
