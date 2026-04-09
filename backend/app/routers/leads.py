@@ -236,7 +236,22 @@ async def get_lead(
             detail="Not authorized to view this lead"
         )
     
-    return serialize_lead(lead)
+    lead_raw = lead.raw_data or {}
+    serialized = serialize_lead(lead)
+    serialized.update({
+        "raw_data": lead_raw,
+        "enriched_data": lead.enriched_data or {},
+        "company_fit_score": float(lead.company_fit_score or 0.0),
+        "signal_score": float(lead.signal_score or 0.0),
+        "signal_keywords": lead.signal_keywords or [],
+        "reason": lead_raw.get("final_reason", []),
+        "score": round(float(lead_raw.get("final_score", 0.0) or 0.0) * 10.0, 2),
+        "ai_generated_message": lead.ai_generated_message,
+        "ai_notes": lead.ai_notes,
+        "contacted_at": lead.contacted_at,
+        "replied_at": lead.replied_at,
+    })
+    return serialized
 
 @router.get("/campaign/{campaign_id}", response_model=List[LeadResponse])
 async def get_campaign_leads(

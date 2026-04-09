@@ -53,6 +53,11 @@ class LeadResponse(LeadBase):
 class LeadDetailResponse(LeadResponse):
     raw_data: Optional[Dict[str, Any]] = None
     enriched_data: Optional[Dict[str, Any]] = None
+    company_fit_score: Optional[float] = 0.0
+    signal_score: Optional[float] = 0.0
+    signal_keywords: Optional[list[str]] = []
+    reason: Optional[list[str]] = []
+    score: Optional[float] = 0.0
     ai_generated_message: Optional[str] = None
     ai_notes: Optional[str] = None
     contacted_at: Optional[datetime] = None
