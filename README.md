@@ -1,263 +1,212 @@
 # Spark Outreach
 
-Spark Outreach is a local SaaS-style outreach platform that combines company profile enrichment, web discovery, semantic embeddings, AI-assisted search, and a React admin UI.
+Spark Outreach is a local SaaS-style outreach platform built with FastAPI, MongoDB, and React. It combines company profile enrichment, query-driven lead discovery, semantic embeddings, AI-assisted scoring, and a modern admin UI.
 
-## What Spark Outreach Does
+## What it does
 
-- Builds and stores company profile data, services, expertise, technologies, industries, and target markets
-- Discovers real company leads from search results using SerpAPI and intelligent website scraping
-- Generates local semantic embeddings using `sentence-transformers`
-- Scores leads based on company profile fit, growth signals, and query relevance
-- Provides campaign and lead workflows for outreach and follow-up
-- Offers AI-assisted message generation, RAG-style search, and embedding quality validation
+- Stores company profile data, services, technologies, industries, and target locations
+- Discovers leads using search queries, Apollo/SerpAPI, and website enrichment
+- Filters and scores leads by company fit, signal strength, and query relevance
+- Persists discovered leads in MongoDB for review and campaign workflows
+- Provides a React dashboard for search, lead review, and outreach tracking
+- Includes an `All Leads` page that loads leads directly from the database
 
----
-
-## Key Features
+## Key features
 
 - FastAPI backend with MongoDB persistence
-- React + TypeScript frontend with campaign, lead, and company profile management
-- Local semantic model pipeline using `paraphrase-mpnet-base-v2`
-- Lead discovery tuned to avoid low-value domains, directories, listicles, and job boards
-- Provider-focused query generation for industry-specific services
-- Search scoring that prioritizes company profile embeddings and business signals
+- React + TypeScript frontend with authenticated dashboard
+- Company profile and campaign setup flows
+- Lead discovery, scraping, enrichment, and scoring
+- Pagination on `All Leads` for 50-lead page increments
+- Apollo-only discovery mode when `APOLLO_API_KEY` is configured
+- Email sanitization and response validation for lead data
 
----
-
-## Architecture Overview
+## Architecture
 
 ### Backend
 
-- `backend/app/main.py` — FastAPI application bootstrap and router registration
+- `backend/app/main.py` — FastAPI startup and router registration
 - `backend/app/config.py` — environment-backed configuration
-- `backend/app/database.py` — MongoDB startup and connection handling
-- `backend/app/routers/` — auth, company, campaign, lead, and AI routes
-- `backend/app/services/` — business logic for company profiles, lead discovery, scraping, embeddings, campaigns, and AI
-- `backend/app/models/` — MongoDB document models
-- `backend/app/schemas/` — Pydantic request/response schemas
-- `backend/app/utils/` — reusable helpers for auth, embeddings, and responses
+- `backend/app/database.py` — MongoDB connection setup
+- `backend/app/routers/` — endpoints for auth, campaigns, companies, leads, and AI
+- `backend/app/services/` — business logic for discovery, scoring, embeddings, and scraping
+- `backend/app/models/` — MongoDB document definitions
+- `backend/app/schemas/` — Pydantic request/response models
+- `backend/app/utils/` — helpers for auth, response serialization, embeddings, and scraping
 
 ### Frontend
 
 - `src/main.tsx` — app bootstrap
-- `src/App.tsx` — route layout and page rendering
-- `src/pages/` — auth, dashboard, company setup, campaigns, lead search, review queue, and settings
-- `src/components/` — reusable UI and layout components
+- `src/App.tsx` — route definitions and protected layout
+- `src/pages/` — page-level UI for dashboard, search, results, leads, campaign, company setup, and settings
+- `src/components/` — reusable UI and dashboard layout components
 - `src/services/api.ts` — centralized API client
-- `src/hooks/` — custom React hooks
+- `src/hooks/` — custom React hooks like toast handling
 
----
+## Environment variables
 
-## Lead Discovery & Search
+Create `backend/.env` with values such as:
 
-Spark Outreach discovers leads using search-engine results and website scraping, then ranks them using company profile context.
+```env
+MONGO_URL=mongodb://localhost:27017
+MONGO_DB_NAME=spark_outreach
+SECRET_KEY=your-secret-key
+GEMINI_API_KEY=
+GROQ_API_KEY=
+APOLLO_API_KEY=
+SERPAPI_KEY=
+SERPER_API_KEY=
+HF_API_KEY=
+REDIS_URL=
+```
 
-### Discovery workflow
+Important backend settings:
 
-- The backend creates targeted search queries from industry, location, service focus, and company profile keywords
-- It uses SerpAPI to retrieve search result URLs
-- It filters out low-value results such as directories, review sites, rankings pages, and generic job boards
-- It scrapes each candidate website for business content, contact details, and summary text
-- It stores discovered leads with raw metadata, quality signals, and discovery relevance
+- `MONGO_URL` — MongoDB connection string
+- `APOLLO_API_KEY` — Apollo discovery key (when set, Apollo-only discovery mode is used)
+- `SERPAPI_KEY` / `SERPER_API_KEY` — search provider keys for fallback discovery
+- `GEMINI_API_KEY` / `GROQ_API_KEY` — LLM provider credentials for query planning and messaging
 
-### Search scoring
+## Frontend routes
 
-- Leads are scored using:
-  - `company_fit` from company profile embeddings
-  - growth/hiring signals detected on the page
-  - semantic relevance to the current search query
-- The search endpoint is: `POST /api/v1/leads/search`
-- Search supports filters such as `location`, `industry`, `services`, and `campaign_id`
+- `/dashboard` — main dashboard
+- `/company-setup` — company profile builder
+- `/search` — lead search and discovery workflow
+- `/leads` — search results page
+- `/all-leads` — new page that loads saved leads from the database
+- `/lead/:id` — lead detail view
+- `/settings` — app settings and embedding checks
 
----
+## API endpoints
 
-## System Flow
+- `POST /api/v1/auth/login` — login
+- `GET /api/v1/auth/me` — current user
+- `GET /api/v1/leads/all` — fetch all leads for current user (supports `skip`, `limit`, `status`)
+- `POST /api/v1/leads/search` — search scored leads
+- `GET /api/v1/leads/{lead_id}` — lead detail
+- `GET /api/v1/leads/campaign/{campaign_id}` — campaign leads
 
-This system implements a multi-stage lead intelligence pipeline: user input is converted into context, market data is collected, signals are detected, leads are matched and scored, results are stored, and user feedback closes the loop.
+## New `All Leads` workflow
 
-### 1. User Input
+The `All Leads` page loads leads directly from the DB through the backend route `GET /api/v1/leads/all`. It supports incremental pagination in 50-lead chunks, so you can fetch the first 50 results and click `Load More` for additional pages.
 
-- The user provides company profile data, service preferences, industry, location, and search queries.
-- Input sources include Company Setup, Lead Search, and Campaign configuration pages.
-- The frontend sends these inputs to backend API routes.
+## Local development
 
-### 2. Context Processing Engine
+### Backend
 
-- The backend builds a semantic profile from company settings and search filters.
-- `company_service.py` normalizes services, expertise, technologies, industries, and locations.
-- `ai_service.py` generates embeddings for the company profile and query context.
-- This creates the intelligence profile used for matching.
+```bash
+cd backend
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-### 3. Intelligence Profile Creation
+### Frontend
 
-- The intelligence profile is the combined fingerprint of:
-  - company service offerings
-  - technical expertise
-  - target industries and markets
-  - location focus
-  - project and product patterns
-- Profile data is stored with the `CompanyProfile` model and persisted in MongoDB.
+```bash
+cd ..
+npm install
+npm run dev
+```
 
-### 4. Market Data Collection
+Open the frontend at the Vite URL shown in the terminal, typically `http://localhost:5173`.
 
-- The scraper engine (`web_scraper.py`) uses provider-focused search queries to collect candidate companies.
-- It calls SerpAPI to retrieve search results and candidate URLs.
-- Each URL is filtered, deduped, and scored for discovery quality.
-- The scraper fetches website content, key pages, metadata, and contact signals.
+## Recommended workflow
 
-### 5. Signal Detection Engine
+1. Start backend and frontend locally.
+2. Register or log in via the frontend.
+3. Complete company profile data in `Company Setup`.
+4. Create a campaign or use an existing one.
+5. Use `Lead Search` to discover leads.
+6. Review results in `Leads`, then use `All Leads` to browse stored database leads.
+7. Mark outreach status and refine your search criteria.
 
-- The scraper and lead service analyze page content for signals such as:
-  - hiring and open roles
-  - rapid scaling and growth language
-  - SaaS/product/platform indicators
-  - technical stack and engineering signals
-  - funding announcements
-- Signals are stored with each lead to support scoring and filtering.
+## Current progress
 
-### 6. Matching Engine
+### What is implemented now
 
-- The matching engine compares discovered leads against the intelligence profile.
-- It uses embedding similarity between company profile embeddings and lead embeddings.
-- It also validates industry, services, and location alignment.
-- This stage prioritizes actual provider matches over generic search results.
+- `All Leads` page is live and supports 50-lead pagination
+- `GET /api/v1/leads/all` fetches saved leads from MongoDB
+- Apollo-only discovery mode is active when `APOLLO_API_KEY` is configured
+- Lead scoring now includes `company_fit_score`, `signal_score`, and `signal_keywords`
+- Email sanitization and response validation are fixed for malformed values
+- Frontend shows lead detail, copy email, and filtering controls
 
-### 7. Lead Scoring Engine
+### What is working today
 
-- The scoring engine computes the final lead score using:
-  - company profile fit
-  - query relevance
-  - signal strength
-  - location match
-- Leads are ranked and annotated with reasons for why they were selected.
+- campaign and company profile flows
+- lead discovery with backend scoring
+- lead detail and outreach tracking
+- incremental lead loading from database
 
-### 8. Leads Database
+### Current roadmap
 
-- Qualified leads are persisted in MongoDB as `Lead` documents.
-- Stored fields include raw discovery metadata, enriched embeddings, scores, signals, and status.
-- The database becomes the source of truth for future searches and campaign actions.
+- improve query planning and Apollo search reliability
+- add more frontend filters for status and company fit
+- add structured lead export or bulk actions
+- extend AI message generation and follow-up workflows
 
-### 9. Dashboard UI
+## Workflow diagrams
 
-- The frontend displays leads with score, reason, company, email, phone, and industry data.
-- Users can filter, review, and prioritize leads from the dashboard.
-- Campaign and lead status actions update the backend state.
+### System workflow
 
-### 10. User Outreach & Feedback Loop
+```mermaid
+flowchart LR
+  A[User Input]
+  B[Company Profile]
+  C[Query Planner]
+  D[Discovery Engine]
+  E[Lead Scoring]
+  F[Lead Storage]
+  G[Frontend Review]
+  H[Outreach Status]
 
-- Users select leads for outreach and update lead status when contacted or converted.
-- Feedback from outreach (contacted/replied/rejected) is stored and used to refine future discovery.
-- Profile updates, campaign changes, and lead outcomes feed back into the intelligence profile.
+  A --> B
+  A --> C
+  B --> E
+  C --> D
+  D --> E
+  E --> F
+  F --> G
+  G --> H
+```
 
----
+### Progress status
 
-## Workflows
+```mermaid
+gantt
+title Spark Outreach Progress
+dateFormat YYYY-MM-DD
+section Backend
+Lead API endpoints        :done,    task1, 2026-03-01, 2026-03-20
+Apollo discovery          :done,    task2, 2026-03-10, 2026-04-08
+Email sanitization        :done,    task3, 2026-04-02, 2026-04-09
+All Leads endpoint        :done,    task4, 2026-04-05, 2026-04-10
+section Frontend
+All Leads UI              :done,    task5, 2026-04-06, 2026-04-10
+Pagination                 :done,    task6, 2026-04-09, 2026-04-10
+Lead scoring display       :done,    task7, 2026-04-08, 2026-04-10
+section Next
+Advanced filters          :active,  task8, 2026-04-10, 2026-04-20
+AI outreach workflow      :active,  task9, 2026-04-10, 2026-04-20
+```
 
-### 1. Local development workflow
+## Notes
 
-1. Start the backend:
-   - `cd backend`
-   - `python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
-2. Start the frontend:
-   - `npm install`
-   - `npm run dev`
-3. Open the frontend in the browser at the Vite URL shown, usually `http://localhost:5173`.
-4. Confirm the backend is reachable and `POST /api/v1/auth/login` works.
+- If `APOLLO_API_KEY` is configured, the backend prefers Apollo for discovery and skips SerpAPI fallback.
+- Lead responses now sanitize email fields for invalid values such as URL-wrapped addresses.
+- The application stores lead scoring values (`company_fit_score`, `signal_score`, `signal_keywords`) so the UI can display fit and signal metrics.
 
-### 2. Company setup workflow
+## Contact
 
-1. Register or log in via the frontend.
-2. Open `Company Setup` and complete the profile:
-   - Services
-   - Expertise areas
-   - Technologies
-   - Target industries
-   - Target locations
-3. Save the profile.
-4. Generate company embeddings through the company profile flow or backend endpoint.
-5. Validate embeddings in `Settings > Embedding Test`.
+For updates or troubleshooting, inspect the backend router and service files:
 
-### 3. Lead discovery workflow
-
-1. Create a campaign or use the default auto-discovery campaign.
-2. Open `Lead Search`.
-3. Enter your search query and apply filters such as `location`, `industry`, and `services`.
-4. Run the search. The backend will:
-   - generate provider-focused discovery queries
-   - call SerpAPI for candidate URLs
-   - filter low-value domains and noise pages
-   - scrape website content and metadata
-   - enrich leads with embeddings, company fit, and signal scores
-5. Review results in the UI.
-
-### 4. Lead scoring and review workflow
-
-1. Use lead scores and reasons to prioritize results.
-2. Review candidate details, including summary, email, phone, and detected signals.
-3. Mark leads as `contacted`, `replied`, `converted`, or `rejected`.
-4. Use campaign status and lead status to manage outreach progress.
-
-### 5. Outreach workflow
-
-1. Select top leads from search results.
-2. Use AI message generation or manual messaging for outreach.
-3. Mark leads as contacted and track responses.
-4. Update lead status based on feedback to improve future search quality.
-
----
-
-## Setup Instructions
-
-### 1. Local development workflow
-
-1. Start the backend:
-   - `cd backend`
-   - `python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
-2. Start the frontend:
-   - `npm install`
-   - `npm run dev`
-3. Open the frontend in the browser at the Vite URL shown, usually `http://localhost:5173`.
-4. Confirm the backend is reachable and `POST /api/v1/auth/login` works.
-
-### 2. Company setup workflow
-
-1. Register or log in via the frontend.
-2. Open `Company Setup` and complete the profile:
-   - Services
-   - Expertise areas
-   - Technologies
-   - Target industries
-   - Target locations
-3. Save the profile.
-4. Generate company embeddings through the company profile flow or backend endpoint.
-5. Validate embeddings in `Settings > Embedding Test`.
-
-### 3. Lead discovery workflow
-
-1. Create a campaign or use the default auto-discovery campaign.
-2. Open `Lead Search`.
-3. Enter your search query and apply filters such as `location`, `industry`, and `services`.
-4. Run the search. The backend will:
-   - generate targeted provider-focused queries
-   - use SerpAPI to fetch candidate URLs
-   - filter low-value domains and noise pages
-   - scrape website content and metadata
-   - enrich leads with embeddings, company fit, and signal scores
-5. Review results in the UI.
-
-### 4. Lead scoring and review workflow
-
-1. Use lead scores and reasons to prioritize results.
-2. Review candidate details, including summary, email, phone, and detected signals.
-3. Mark leads as `contacted`, `replied`, `converted`, or `rejected`.
-4. Use campaign status and lead status to manage outreach progress.
-
-### 5. Outreach workflow
-
-1. Select top leads from search results.
-2. Use the AI message generation endpoint or frontend workflow to create outreach copy.
-3. Send messages or mark leads as contacted.
-4. Track lead engagement status in the lead dashboard.
+- `backend/app/routers/leads.py`
+- `backend/app/services/lead_service.py`
+- `backend/app/services/apollo_service.py`
+- `src/pages/AllLeads.tsx`
+- `src/services/api.ts`
 
 ---
 
