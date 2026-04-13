@@ -203,6 +203,37 @@ export const leadsAPI = {
     if (status) url += `&status=${encodeURIComponent(status)}`;
     return apiCall(url, { requiresAuth: true });
   },
+
+  hot: async (limit = 50) => {
+    return apiCall(`/leads/hot?limit=${limit}`, { requiresAuth: true });
+  },
+
+  generateEmail: async (leadId: string) => {
+    return apiCall(`/leads/${leadId}/generate-email`, {
+      method: "POST",
+      requiresAuth: true,
+    });
+  },
+
+  enrich: async (leadId: string) => {
+    return apiCall(`/leads/${leadId}/enrich`, {
+      method: "POST",
+      requiresAuth: true,
+    });
+  },
+
+  runIntentScan: async () => {
+    return apiCall("/leads/run-intent-scan", {
+      method: "POST",
+      requiresAuth: true,
+    });
+  },
+
+  getScanStatus: async () => {
+    return apiCall("/leads/scan-status", {
+      requiresAuth: true,
+    });
+  },
 };
 
 // AI API

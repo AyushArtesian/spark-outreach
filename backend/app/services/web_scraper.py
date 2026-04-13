@@ -1215,6 +1215,7 @@ async def discover_company_websites(
 
     for candidate in (planned_queries or []):
         normalized = _compact_query([candidate], max_len=220).strip().lower()
+        normalized = _normalize_location_text(normalized)
         if not normalized or normalized in seen_queries:
             continue
         seen_queries.add(normalized)

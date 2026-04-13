@@ -2,12 +2,14 @@
 Service for lead operations using MongoDB
 """
 from typing import List, Optional, Dict, Any, Set, Tuple
+import asyncio
 from app.models.lead import Lead
 from app.models.company import CompanyProfile
 from app.schemas.lead import LeadCreate, LeadUpdate
 from app.utils.embeddings import embedding_service
 from app.services.web_scraper import _normalize_location_text, analyze_business_signals
 from app.services.apollo_service import apollo_service
+from app.services.service_catalog import infer_services_from_text
 from datetime import datetime
 from bson import ObjectId
 from urllib.parse import urlparse
@@ -37,6 +39,173 @@ NEARBY_LOCATION_HINTS = {
 
 class LeadService:
     """Service for lead-related operations with MongoDB"""
+
+    @staticmethod
+    def _as_service_list(value: Any) -> List[str]:
+        """Convert service filters to a clean string list."""
+        if not value:
+            return []
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, (list, tuple, set)):
+            items = [str(item) for item in value]
+        else:
+            items = [str(value)]
+
+        cleaned: List[str] = []
+        seen: Set[str] = set()
+        for item in items:
+            normalized = re.sub(r"\s+", " ", str(item).strip())
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(normalized)
+        return cleaned
+
+    @staticmethod
+    def _extract_service_candidates(
+        service_focus: Any,
+        company_services: Optional[List[str]],
+        query: str,
+        limit: int = 3,
+    ) -> List[str]:
+        """Pick top service candidates for intent-focused SERP query building."""
+        candidates: List[str] = []
+        seen: Set[str] = set()
+
+        def _add_service(raw_service: str) -> None:
+            service = re.sub(r"\s+", " ", str(raw_service).strip())
+            if not service:
+                return
+            key = service.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(service)
+
+        for service in LeadService._as_service_list(service_focus):
+            _add_service(service)
+            if len(candidates) >= limit:
+                return candidates
+
+        for service in LeadService._as_service_list(company_services or []):
+            _add_service(service)
+            if len(candidates) >= limit:
+                return candidates
+
+        inferred_services = infer_services_from_text(query, limit=limit)
+        for label in inferred_services:
+            _add_service(label)
+            if len(candidates) >= limit:
+                return candidates
+
+        if not candidates:
+            _add_service("Custom software development")
+
+        return candidates[:limit]
+
+    @staticmethod
+    def _append_current_year(query: str, year: int) -> str:
+        """Append current year if it is not already present."""
+        compact = re.sub(r"\s+", " ", str(query or "").strip())
+        if not compact:
+            return ""
+        if re.search(rf"\b{year}\b", compact):
+            return compact
+        return f"{compact} {year}"
+
+    @staticmethod
+    def _ensure_negative_filters(query: str) -> str:
+        """Ensure common job-page exclusions are always present in SERP queries."""
+        compact = re.sub(r"\s+", " ", str(query or "").strip())
+        if not compact:
+            return ""
+
+        has_jobs = bool(re.search(r"(?:^|\s)-jobs(?:\s|$)", compact))
+        has_careers = bool(re.search(r"(?:^|\s)-careers(?:\s|$)", compact))
+        suffix: List[str] = []
+        if not has_jobs:
+            suffix.append("-jobs")
+        if not has_careers:
+            suffix.append("-careers")
+        if not suffix:
+            return compact
+        return f"{compact} {' '.join(suffix)}"
+
+    @staticmethod
+    def _build_buyer_intent_serp_queries(
+        service_focus: Any,
+        company_services: Optional[List[str]],
+        location: Optional[str],
+        target_locations: Optional[List[str]],
+        query: str,
+        max_queries: int = 10,
+    ) -> List[str]:
+        """Build high-intent, buyer-focused SERP queries for lead discovery."""
+        location_text = _normalize_location_text(str(location or "").strip()) or str(location or "").strip()
+        if not location_text and target_locations:
+            location_text = (
+                _normalize_location_text(str(target_locations[0]).strip())
+                or str(target_locations[0]).strip()
+            )
+        if not location_text:
+            location_text = "India"
+
+        services = LeadService._extract_service_candidates(
+            service_focus=service_focus,
+            company_services=company_services,
+            query=query,
+            limit=3,
+        )
+
+        current_year = datetime.utcnow().year
+        queries: List[str] = []
+        seen: Set[str] = set()
+
+        for service in services:
+            base_patterns = [
+                f'"hire {service} developer" OR "looking for {service}" {location_text}',
+                f'"{service} implementation partner" {location_text}',
+                f'"{service} consultant" "contact us" "get a quote" {location_text}',
+                f'intitle:"{service}" "request a demo" OR "get a quote" {location_text}',
+                f'"{service}" "digital transformation" "implementation partner" {location_text} company',
+            ]
+
+            service_lower = service.lower()
+            if any(token in service_lower for token in ["power apps", "power platform", "power automate"]):
+                base_patterns.extend(
+                    [
+                        f'"Microsoft Power Platform" "implementation partner" {location_text}',
+                        f'"Power Apps" "Power Automate" services "get a quote" {location_text}',
+                    ]
+                )
+
+            if any(
+                token in service_lower
+                for token in ["ecommerce", "e-commerce", "shopify", "woocommerce", "magento"]
+            ):
+                base_patterns.extend(
+                    [
+                        f'"Shopify development" agency "get a quote" {location_text}',
+                        f'"WooCommerce" OR "Magento" development company "implementation partner" {location_text}',
+                    ]
+                )
+
+            for pattern in base_patterns:
+                enriched = LeadService._append_current_year(pattern, current_year)
+                enriched = LeadService._ensure_negative_filters(enriched)
+                key = enriched.lower()
+                if not enriched or key in seen:
+                    continue
+                seen.add(key)
+                queries.append(enriched)
+                if len(queries) >= max_queries:
+                    return queries
+
+        return queries
 
     @staticmethod
     def _canonical_domain(value: str) -> str:
@@ -132,6 +301,261 @@ class LeadService:
             return f"company:{company}"
 
         return f"lead:{str(lead.id)}"
+
+    @staticmethod
+    def _clamp_int(value: float, minimum: int, maximum: int) -> int:
+        return max(minimum, min(maximum, int(round(value))))
+
+    @staticmethod
+    def _grade_from_total(total_score: int) -> str:
+        if total_score >= 70:
+            return "A"
+        if total_score >= 50:
+            return "B"
+        if total_score >= 30:
+            return "C"
+        return "D"
+
+    @staticmethod
+    def _recommended_action(total_score: int) -> str:
+        if total_score >= 70:
+            return "contact_immediately"
+        if total_score >= 50:
+            return "add_to_sequence"
+        if total_score >= 30:
+            return "nurture"
+        return "skip"
+
+    @staticmethod
+    def _extract_employee_count(raw: Dict[str, Any]) -> Optional[int]:
+        candidates = [
+            raw.get("employee_count"),
+            raw.get("employees"),
+            raw.get("company_size"),
+            raw.get("apollo_employee_count"),
+            raw.get("apollo_num_employees"),
+            raw.get("organization_num_employees"),
+        ]
+
+        for value in candidates:
+            if value is None:
+                continue
+            if isinstance(value, (int, float)):
+                count = int(value)
+                if count > 0:
+                    return count
+
+            text = str(value).strip().lower()
+            if not text:
+                continue
+
+            range_match = re.search(r"(\d{1,6})\s*(?:-|to)\s*(\d{1,6})", text)
+            if range_match:
+                low = int(range_match.group(1))
+                high = int(range_match.group(2))
+                if high >= low:
+                    return (low + high) // 2
+
+            number_match = re.search(r"\d{1,6}", text)
+            if number_match:
+                return int(number_match.group(0))
+
+        return None
+
+    @staticmethod
+    def _score_size_fit(employee_count: Optional[int]) -> int:
+        if employee_count is None or employee_count <= 0:
+            return 0
+        if 50 <= employee_count <= 200:
+            return 10
+        if 20 <= employee_count < 50 or 200 < employee_count <= 500:
+            return 7
+        if 500 < employee_count <= 1000:
+            return 3
+        return 0
+
+    @staticmethod
+    def _score_intent(
+        raw: Dict[str, Any],
+        enriched: Dict[str, Any],
+        service_hints: List[str],
+    ) -> int:
+        source = str(raw.get("source", "")).strip().lower()
+        intent_signal = str(raw.get("intent_signal", "")).strip().lower()
+        if intent_signal == "hiring" or source.startswith("job_board"):
+            return 25
+
+        company_signals = enriched.get("company_signals", {}) if isinstance(enriched, dict) else {}
+        searchable = " ".join(
+            [
+                str(raw.get("snippet", "")),
+                str(raw.get("company_summary", "")),
+                str(raw.get("title", "")),
+                str(company_signals.get("news_snippets", "")),
+            ]
+        ).lower()
+
+        service_tokens = []
+        for service in service_hints:
+            service_tokens.extend([token for token in re.split(r"\W+", str(service).lower()) if len(token) >= 3])
+        has_service_mention = any(token in searchable for token in set(service_tokens)) if service_tokens else True
+
+        has_rfq = any(
+            phrase in searchable
+            for phrase in ["request a demo", "get a quote", "rfq", "contact us", "request for proposal"]
+        )
+        if has_rfq and has_service_mention:
+            return 15
+
+        if bool(company_signals.get("recent_funding")):
+            return 10
+
+        if bool(company_signals.get("digital_transformation")) or "digital transformation" in searchable:
+            return 5
+
+        return 0
+
+    @staticmethod
+    def _score_tech_stack(
+        enriched: Dict[str, Any],
+        service_hints: List[str],
+    ) -> int:
+        tech = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
+        technologies = [str(t).strip().lower() for t in (tech.get("technologies") or []) if str(t).strip()]
+        cms = str(tech.get("cms", "")).strip().lower()
+        ecommerce_platform = str(tech.get("ecommerce_platform", "")).strip()
+        uses_microsoft_stack = bool(tech.get("uses_microsoft_stack", False))
+        fallback_text = " ".join(
+            [
+                " ".join([str(t).strip().lower() for t in (tech.get("technologies") or []) if str(t).strip()]),
+                str(tech.get("cms", "")).strip().lower(),
+                str(tech.get("ecommerce_platform", "")).strip().lower(),
+            ]
+        ).strip()
+
+        service_text = " ".join([str(s).strip().lower() for s in service_hints if str(s).strip()])
+        power_apps_focus = any(token in service_text for token in ["power apps", "power platform", "power automate", "dynamics"])
+        ecommerce_focus = any(token in service_text for token in ["ecommerce", "e-commerce", "shopify", "woocommerce", "magento"])
+
+        if power_apps_focus and uses_microsoft_stack:
+            return 20
+        if ecommerce_focus and ecommerce_platform:
+            return 20
+
+        service_tokens = [token for token in re.split(r"\W+", service_text) if len(token) >= 3]
+        tech_tokens = set(technologies)
+        if cms:
+            tech_tokens.add(cms)
+        if ecommerce_platform:
+            tech_tokens.add(ecommerce_platform.lower())
+
+        overlap_hits = 0
+        for token in set(service_tokens):
+            if any(token in candidate for candidate in tech_tokens):
+                overlap_hits += 1
+            elif token in fallback_text:
+                overlap_hits += 1
+
+        if overlap_hits >= 2:
+            return 20
+        if overlap_hits == 1 or uses_microsoft_stack or bool(ecommerce_platform):
+            return 10
+        return 0
+
+    @staticmethod
+    def _score_contact_availability(raw: Dict[str, Any], enriched: Dict[str, Any]) -> int:
+        decision = enriched.get("decision_maker", {}) if isinstance(enriched, dict) else {}
+        tech = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
+
+        name = str(decision.get("name", "")).strip()
+        title = str(decision.get("title", "")).strip()
+        email = str(decision.get("email", "")).strip() or str(raw.get("company_email", "")).strip()
+        has_contact_form = bool(decision.get("has_contact_form", False) or tech.get("has_contact_form", False))
+
+        if name and email and (title or name):
+            return 15
+        if email:
+            return 8
+        if has_contact_form:
+            return 4
+        return 0
+
+    async def calculate_lead_score(
+        self,
+        lead: Lead,
+        company_profile: Optional[CompanyProfile] = None,
+        service_hints: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Calculate transparent 0-100 lead score with weighted component breakdown."""
+        raw = lead.raw_data or {}
+        enriched = lead.enriched_data if isinstance(lead.enriched_data, dict) else {}
+        service_candidates = self._as_service_list(service_hints or raw.get("service_focus") or [])
+        if not service_candidates and company_profile and company_profile.services:
+            service_candidates = self._as_service_list(company_profile.services)
+
+        # 1) Service fit (0-30) based on existing embedding infrastructure.
+        similarity = float(lead.company_fit_score or 0.0)
+        if company_profile and company_profile.company_embeddings and lead.lead_embedding:
+            try:
+                similarities = await embedding_service.similarity_search(
+                    company_profile.company_embeddings,
+                    [lead.lead_embedding],
+                    top_k=1,
+                )
+                if similarities:
+                    similarity = float(similarities[0][1] or 0.0)
+            except Exception as e:
+                print(f"[LEAD SCORE] Similarity calculation failed for {lead.company}: {e}")
+
+        similarity = max(0.0, min(1.0, similarity))
+        service_fit_score = self._clamp_int(similarity * 30.0, 0, 30)
+
+        # 2) Intent score (0-25).
+        intent_score = self._clamp_int(
+            self._score_intent(raw=raw, enriched=enriched, service_hints=service_candidates),
+            0,
+            25,
+        )
+
+        # 3) Tech stack match (0-20).
+        tech_stack_score = self._clamp_int(
+            self._score_tech_stack(enriched=enriched, service_hints=service_candidates),
+            0,
+            20,
+        )
+
+        # 4) Contact availability (0-15).
+        contact_score = self._clamp_int(
+            self._score_contact_availability(raw=raw, enriched=enriched),
+            0,
+            15,
+        )
+
+        # 5) Company size fit (0-10).
+        employee_count = self._extract_employee_count(raw)
+        size_fit_score = self._clamp_int(self._score_size_fit(employee_count), 0, 10)
+
+        total_score = self._clamp_int(
+            service_fit_score + intent_score + tech_stack_score + contact_score + size_fit_score,
+            0,
+            100,
+        )
+        grade = self._grade_from_total(total_score)
+        recommended_action = self._recommended_action(total_score)
+
+        return {
+            "total_score": total_score,
+            "grade": grade,
+            "breakdown": {
+                "service_fit": service_fit_score,
+                "intent_score": intent_score,
+                "tech_stack": tech_stack_score,
+                "contact_availability": contact_score,
+                "size_fit": size_fit_score,
+            },
+            "is_hot_lead": total_score >= 70,
+            "recommended_action": recommended_action,
+        }
     
     @staticmethod
     def create_lead(lead: LeadCreate) -> Lead:
@@ -259,7 +683,12 @@ class LeadService:
         )
 
         industry = filters.get("industry") if filters else None
-        location = filters.get("location") if filters else None
+        raw_location = filters.get("location") if filters else None
+        location = (
+            _normalize_location_text(str(raw_location).strip())
+            if raw_location and str(raw_location).strip()
+            else None
+        )
         
         # === AUTO-EXTRACT INDUSTRY FROM SEARCH QUERY ===
         # If no industry filter, extract from query for richer context
@@ -378,10 +807,36 @@ class LeadService:
             except Exception as e:
                 print(f"Lead query planning failed: {e}")
 
+        intent_queries = self._build_buyer_intent_serp_queries(
+            service_focus=service_focus,
+            company_services=company_services,
+            location=location,
+            target_locations=target_locations,
+            query=query,
+            max_queries=10,
+        )
+        if intent_queries:
+            planned_queries = intent_queries
+            planner_meta.update(
+                {
+                    "planner": "intent_serp_templates",
+                    "model": "deterministic",
+                    "strategy": "Buyer-intent SERP patterns with yearly freshness",
+                    "planned_queries_count": len(planned_queries),
+                }
+            )
+            print(
+                "[LEAD QUERY PLANNER] "
+                f"using_intent_templates planned_queries={len(planned_queries)}"
+            )
+            for idx, candidate in enumerate(planned_queries[:5], 1):
+                print(f"[LEAD QUERY PLANNER] intent_query_{idx}: {candidate}")
+
         if not planned_queries:
             print("[LEAD QUERY PLANNER] Using heuristic query generation fallback.")
 
         apollo_discovered: List[Dict[str, Any]] = []
+        apollo_credit_exhausted = False
         if apollo_service.enabled:
             try:
                 apollo_discovered = await apollo_service.search_people(
@@ -392,13 +847,14 @@ class LeadService:
                     company_sizes=company_sizes,
                     max_results=max_results,
                 )
+                apollo_credit_exhausted = bool(getattr(apollo_service, "last_run_credit_exhausted", False))
             except Exception as e:
                 print(f"[APOLLO] Discovery failed: {e}")
         else:
             print("[APOLLO] APOLLO_API_KEY missing; skipping Apollo people discovery.")
 
         web_discovered: List[Dict[str, Any]] = []
-        apollo_only_mode = bool(apollo_service.enabled)
+        apollo_only_mode = bool(apollo_service.enabled and not apollo_credit_exhausted)
         if apollo_only_mode:
             if apollo_discovered:
                 print(
@@ -412,6 +868,11 @@ class LeadService:
                     "Skipping SerpAPI fallback by request."
                 )
         else:
+            if apollo_service.enabled and apollo_credit_exhausted:
+                print(
+                    "[LEAD DISCOVERY SOURCES] "
+                    "Apollo credits exhausted. Enabling SerpAPI/web fallback for this search."
+                )
             web_limit = max(5, int(max_results))
             web_discovered = await discover_company_websites(
                 query=query,
@@ -424,10 +885,87 @@ class LeadService:
                 max_results=web_limit,
             )
 
-        discovered = apollo_discovered if apollo_only_mode else web_discovered
+        jobboard_discovered: List[Dict[str, Any]] = []
+        try:
+            from app.services.jobboard_service import jobboard_service
+
+            jobboard_services = self._extract_service_candidates(
+                service_focus=service_focus,
+                company_services=company_services,
+                query=query,
+                limit=2,
+            )
+            jobboard_locations: List[str] = []
+            if location:
+                jobboard_locations.append(str(location))
+            for loc in target_locations or []:
+                normalized = str(loc).strip()
+                if normalized and normalized.lower() not in [l.lower() for l in jobboard_locations]:
+                    jobboard_locations.append(normalized)
+            if not jobboard_locations:
+                jobboard_locations = ["India"]
+
+            print(
+                "[JOBBOARD] "
+                f"starting additive discovery services={len(jobboard_services)} "
+                f"locations={len(jobboard_locations[:1])} timeout=25s"
+            )
+
+            discovered_jobs: List[Dict[str, Any]] = []
+            try:
+                discovered_jobs = await asyncio.wait_for(
+                    jobboard_service.run_intent_discovery(
+                        services=jobboard_services,
+                        locations=jobboard_locations[:1],
+                    ),
+                    timeout=25.0,
+                )
+            except asyncio.TimeoutError:
+                print("[JOBBOARD] Additive discovery timed out after 25s; continuing without job-board results.")
+                discovered_jobs = []
+
+            for job in discovered_jobs:
+                company_website = str(job.get("company_website") or "").strip()
+                domain = self._canonical_domain(company_website)
+                company_name = str(job.get("company_name") or "").strip()
+                posting_title = str(job.get("job_title") or "").strip()
+                posting_location = str(job.get("location") or "").strip()
+                if not company_name or not posting_title:
+                    continue
+
+                jobboard_discovered.append(
+                    {
+                        "source": "job_board",
+                        "name": company_name,
+                        "company": company_name,
+                        "email": "",
+                        "phone": "",
+                        "job_title": posting_title,
+                        "industry": industry,
+                        "url": company_website,
+                        "domain": domain,
+                        "title": posting_title,
+                        "snippet": f"Active hiring signal: {posting_title} in {posting_location or location or 'target location'}",
+                        "location": posting_location,
+                        "intent_signal": "hiring",
+                        "posted_date": str(job.get("posted_date") or ""),
+                        "apollo_person_id": "",
+                        "apollo_organization_id": "",
+                        "linkedin_url": "",
+                        "email_status": "",
+                    }
+                )
+        except Exception as e:
+            print(f"[JOBBOARD] Discovery failed: {e}")
+
+        if apollo_only_mode:
+            discovered = [*apollo_discovered, *jobboard_discovered]
+        else:
+            discovered = [*apollo_discovered, *web_discovered, *jobboard_discovered]
         print(
             "[LEAD DISCOVERY SOURCES] "
-            f"apollo={len(apollo_discovered)} web={len(web_discovered)} total_candidates={len(discovered)}"
+            f"apollo={len(apollo_discovered)} web={len(web_discovered)} "
+            f"jobboard={len(jobboard_discovered)} total_candidates={len(discovered)}"
         )
         if not discovered:
             return 0
@@ -463,7 +1001,7 @@ class LeadService:
         skipped_location_mismatch = 0
         for item in discovered:
             item_source = str(item.get("source") or "web_discovery").strip().lower()
-            domain = self._canonical_domain(item.get("domain") or item.get("url") or "")
+            domain = self._canonical_domain(item.get("domain") or item.get("url") or item.get("company_website") or "")
             apollo_person_id = str(item.get("apollo_person_id") or "").strip()
             item_email = str(item.get("email") or "").strip().lower()
             contact_key = item_email if item_email else (f"apollo:{apollo_person_id}" if apollo_person_id else "")
@@ -505,6 +1043,10 @@ class LeadService:
                 inferred = _normalize_location_text(str(location or "").strip().lower())
                 if inferred and inferred in location_scope:
                     detected_location = inferred
+            if item_source.startswith("job_board") and location_scope and not detected_location:
+                inferred = _normalize_location_text(str(item.get("location") or location or "").strip().lower())
+                if inferred and inferred in location_scope:
+                    detected_location = inferred
 
             if item_source.startswith("apollo"):
                 snapshot = {
@@ -524,6 +1066,13 @@ class LeadService:
                     ]
                 )
                 detected_location = self._extract_location_hit(detailed_location_text, location_scope)
+                # For web-discovered leads, if no explicit location match but location was requested,
+                # infer the location from the requested search parameter (user requested London → lead is London-relevant)
+                if not detected_location and item_source == "web_discovery" and location:
+                    inferred_location = _normalize_location_text(str(location or "").strip().lower())
+                    if inferred_location and inferred_location in location_scope:
+                        detected_location = inferred_location
+                
                 if not detected_location:
                     skipped_location_mismatch += 1
                     continue
@@ -540,7 +1089,7 @@ class LeadService:
             if any(
                 token in combined_quality_text
                 for token in [
-                    "top 10", "top 50", "top 100", "list of", "to work for", "job",
+                    "top 10", "top 50", "top 100", "list of", "to work for",
                     "salary", "rankings", "directory", "compare",
                 ]
             ):
@@ -578,10 +1127,14 @@ class LeadService:
             quality_score = 0.0
             if item_source.startswith("apollo"):
                 quality_score += 0.25
+            if item_source.startswith("job_board"):
+                quality_score += 0.24
             if apollo_person_id:
                 quality_score += 0.10
             if str(item.get("job_title") or "").strip():
                 quality_score += 0.12
+            if str(item.get("intent_signal") or "").strip().lower() == "hiring":
+                quality_score += 0.20
             if str(item.get("linkedin_url") or "").strip():
                 quality_score += 0.08
             if snapshot.get("company_name") and len(snapshot.get("company_name", "")) > 3:
@@ -643,6 +1196,22 @@ class LeadService:
                 else:
                     relevance_hint = max(0.15, relevance_hint - 0.05)
 
+            enrichment_payload: Dict[str, Any] = {}
+            try:
+                from app.services.enrichment_service import enrichment_service
+
+                enrichment_payload = await enrichment_service.enrich_lead(
+                    {
+                        "company_name": company_name,
+                        "company_website": item.get("url", "") or item.get("company_website", ""),
+                        "source_url": item.get("url", "") or item.get("company_website", ""),
+                        "snippet": item.get("snippet", ""),
+                        "source": item_source,
+                    }
+                )
+            except Exception as e:
+                print(f"Lead enrichment failed for {company_name}: {e}")
+
             lead = Lead(
                 campaign_id=str(campaign.id),
                 name=lead_name,
@@ -658,10 +1227,16 @@ class LeadService:
                 status="new",
                 signal_keywords=signal_keywords,
                 signal_score=signal_confidence,
+                enriched_data={
+                    "tech_stack": enrichment_payload.get("tech_stack", {}),
+                    "decision_maker": enrichment_payload.get("decision_maker", {}),
+                    "company_signals": enrichment_payload.get("company_signals", {}),
+                    "enriched_at": enrichment_payload.get("enriched_at", ""),
+                },
                 raw_data={
                     "source": item_source,
-                    "source_url": item.get("url", ""),
-                    "company_website": item.get("url", ""),
+                    "source_url": item.get("url", "") or item.get("company_website", ""),
+                    "company_website": item.get("url", "") or item.get("company_website", ""),
                     "title": item.get("title", ""),
                     "snippet": item.get("snippet", ""),
                     "query": query,
@@ -683,6 +1258,12 @@ class LeadService:
                     "signal_confidence": signal_confidence,
                     "signal_reasons": signal_reasons,
                     "tech_relevance": tech_relevance,
+                    "intent_signal": str(item.get("intent_signal") or ""),
+                    "job_posted_date": str(item.get("posted_date") or ""),
+                    "employee_count": item.get("employee_count"),
+                    "tech_stack": enrichment_payload.get("tech_stack", {}),
+                    "decision_maker": enrichment_payload.get("decision_maker", {}),
+                    "company_signals": enrichment_payload.get("company_signals", {}),
                     "apollo_person_id": apollo_person_id,
                     "apollo_organization_id": str(item.get("apollo_organization_id") or ""),
                     "apollo_email_status": str(item.get("email_status") or ""),
@@ -1037,13 +1618,22 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         skipped_low_relevance = 0
         collapsed_duplicates = 0
 
-        apollo_only_mode = bool(apollo_service.enabled)
+        apollo_only_mode = bool((filters or {}).get("apollo_only"))
+        source_mode = str((filters or {}).get("source_mode") or "").strip().lower()
+        if source_mode in {"apollo", "apollo_only"}:
+            apollo_only_mode = True
         if apollo_only_mode:
             print("[LEAD SCORING] Apollo-only mode active. Filtering out non-Apollo stored leads.")
 
         filter_location = (filters or {}).get("location") if filters else None
         profile_target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
         location_scope = self._build_location_scope(filter_location, profile_target_locations)
+        service_hints = self._as_service_list((filters or {}).get("services") or [])
+
+        try:
+            from app.services.enrichment_service import enrichment_service
+        except Exception:
+            enrichment_service = None
         
         for lead in all_leads:
             if not self._lead_matches_search_constraints(lead, query, filters):
@@ -1054,13 +1644,12 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             if self._is_invalid_embedding(lead.lead_embedding, expected_dim=len(query_embedding)):
                 lead = await self.enrich_lead_profile(lead, company_profile)
             
-            # === PRIMARY SCORING: Use company profile embeddings ===
-            # Company profile fit is the main scoring factor
+            # Keep compatibility metric: company profile embedding similarity (0-1).
             company_fit_score = 0.0
             if company_profile and company_profile.company_embeddings and lead.lead_embedding:
                 try:
                     similarities = await embedding_service.similarity_search(
-                        company_profile.company_embeddings,  # Use company profile as primary context
+                        company_profile.company_embeddings,
                         [lead.lead_embedding],
                         top_k=1
                     )
@@ -1069,8 +1658,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                     print(f"Error calculating company fit for {lead.company}: {e}")
                     company_fit_score = 0.0
             
-            # === SECONDARY SCORING: Query relevance ===
-            # Query score is secondary, supports company fit
+            # Keep compatibility metric: query-to-lead embedding relevance (0-1).
             query_score = 0.0
             if lead.lead_embedding:
                 try:
@@ -1090,6 +1678,37 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 skipped_constraints += 1
                 continue
 
+            if enrichment_service and (
+                not isinstance(lead.enriched_data, dict)
+                or not lead.enriched_data.get("tech_stack")
+                or not lead.enriched_data.get("decision_maker")
+                or not lead.enriched_data.get("company_signals")
+            ):
+                try:
+                    enrichment_payload = await enrichment_service.enrich_lead(
+                        {
+                            "company": lead.company,
+                            "name": lead.name,
+                            "company_website": lead_raw.get("company_website") or lead_raw.get("source_url"),
+                            "source_url": lead_raw.get("source_url"),
+                            "snippet": lead_raw.get("snippet", ""),
+                            "source": source_name,
+                        }
+                    )
+                    lead.enriched_data = {
+                        "tech_stack": enrichment_payload.get("tech_stack", {}),
+                        "decision_maker": enrichment_payload.get("decision_maker", {}),
+                        "company_signals": enrichment_payload.get("company_signals", {}),
+                        "enriched_at": enrichment_payload.get("enriched_at", ""),
+                    }
+                    lead.raw_data = lead.raw_data or {}
+                    lead.raw_data["tech_stack"] = enrichment_payload.get("tech_stack", {})
+                    lead.raw_data["decision_maker"] = enrichment_payload.get("decision_maker", {})
+                    lead.raw_data["company_signals"] = enrichment_payload.get("company_signals", {})
+                    lead_raw = lead.raw_data
+                except Exception as e:
+                    print(f"[LEAD SCORE] enrichment fallback failed for {lead.company}: {e}")
+
             signal_strength = float(lead.signal_score or lead_raw.get("signal_confidence", 0.0) or 0.0)
             location_match = 0.0
             if location_scope:
@@ -1104,101 +1723,78 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 )
                 if self._extract_location_hit(location_text, location_scope):
                     location_match = 1.0
-            
-            # Combined score: company fit + signal score + location
-            # NEW WEIGHTS: company fit is primary (60%), signals secondary (30%), location (10%)
+
+            score_card = await self.calculate_lead_score(
+                lead=lead,
+                company_profile=company_profile,
+                service_hints=service_hints,
+            )
+            total_score = int(score_card.get("total_score", 0) or 0)
+            combined_score = max(0.0, min(1.0, total_score / 100.0))
+
+            # Use combined score as default fallback for final_score display
             if sort_by == "fit_score":
                 final_score = company_fit_score if company_fit_score > 0 else lead.company_fit_score or 0.0
             elif sort_by == "signal_score":
                 final_score = signal_strength
             elif sort_by == "created_at":
-                final_score = lead.created_at.timestamp() if lead.created_at else 0.0
-            elif sort_by == "combined":
-                # Prioritize fit and query relevance, then intent signals and location evidence.
-                if company_fit_score > 0:
-                    final_score = (
-                        company_fit_score * 0.50 +
-                        query_score * 0.20 +
-                        signal_strength * 0.20 +
-                        location_match * 0.10
-                    )
-                else:
-                    final_score = (
-                        query_score * 0.55 +
-                        signal_strength * 0.25 +
-                        location_match * 0.20
-                    )
+                # For created_at sort, use combined score as display score but track timestamp separately for sorting
+                final_score = combined_score
             else:
-                final_score = 0.0
+                final_score = combined_score
 
-            # Apollo records with validated contact fields get a small quality lift.
-            if source_name.startswith("apollo"):
-                contact_bonus = 0.0
-                email_val = str(lead.email or "").strip().lower()
-                if email_val and not email_val.endswith("@apollo.local"):
-                    contact_bonus += 0.08
-                if str(lead.phone or "").strip():
-                    contact_bonus += 0.05
-                if str(lead_raw.get("apollo_person_id", "")).strip():
-                    contact_bonus += 0.04
-                final_score = min(1.0, final_score + contact_bonus)
-
-            signal_keywords = lead.signal_keywords or lead_raw.get("discovery_signals", []) or []
-            # Relaxed thresholds to show more discovered leads
-            min_signal_threshold = 0.10 if source_name.startswith("apollo") else 0.18
-            if sort_by == "combined" and signal_strength < min_signal_threshold and len(signal_keywords) == 0:
-                skipped_no_signals += 1
-                continue
-
-            # Require at least moderate semantic relevance to company profile or search intent.
-            min_relevance = 0.24 if source_name.startswith("apollo") else 0.28
-            if sort_by == "combined" and max(company_fit_score, query_score) < min_relevance:
-                skipped_low_relevance += 1
-                continue
-
-            # Drop low-confidence results after location and relevance constraints.
-            min_final = 0.42 if source_name.startswith("apollo") else 0.45
-            if sort_by == "combined" and final_score < min_final:
-                skipped_low_score += 1
-                continue
+            if sort_by == "combined":
+                final_score = combined_score
 
             reason = []
+            if score_card.get("is_hot_lead"):
+                reason.append("Hot lead score band")
             if company_fit_score >= 0.60:
                 reason.append(f"Strong company profile fit ({company_fit_score:.0%})")
-            elif company_fit_score >= 0.45:
-                reason.append(f"Good company profile alignment ({company_fit_score:.0%})")
-            if signal_strength >= 0.40:
-                reason.append(f"Strong growth signals ({signal_strength:.0%})")
             if location_match >= 1.0:
                 reason.append("Matches target location")
-            if query_score >= 0.50:
-                reason.append(f"Relevant to search query ({query_score:.0%})")
-            if source_name.startswith("apollo") and str(lead_raw.get("apollo_person_id", "")).strip():
-                reason.append("Apollo contact match")
+            if score_card.get("recommended_action"):
+                reason.append(f"Action: {score_card['recommended_action']}")
             if not reason:
-                reason.append("Qualified by company profile matching")
+                reason.append("Scored by multi-signal lead rubric")
 
             dedupe_key = self._lead_dedupe_key(lead)
+            
+            # Determine sort key based on sort_by parameter
+            if sort_by == "created_at":
+                sort_key = lead.created_at.timestamp() if lead.created_at else 0.0
+            else:
+                sort_key = final_score
+            
             best = scored_best_by_key.get(dedupe_key)
-            if best and best[1] >= final_score:
+            if best and best[1] >= sort_key:
                 collapsed_duplicates += 1
                 continue
-            if best and best[1] < final_score:
+            if best and best[1] < sort_key:
                 collapsed_duplicates += 1
 
             lead.raw_data = lead.raw_data or {}
             lead.raw_data["final_reason"] = reason
             lead.raw_data["final_score"] = final_score
+            lead.raw_data["final_score_100"] = total_score
+            lead.raw_data["score_card"] = score_card
             lead.raw_data["company_fit_score_calc"] = company_fit_score
             lead.raw_data["embedding_similarity"] = query_score
             lead.raw_data["location_match"] = location_match
             lead.raw_data["signal_strength"] = signal_strength
+            lead.company_fit_score = max(float(lead.company_fit_score or 0.0), float(company_fit_score or 0.0))
+            lead.signal_score = max(float(lead.signal_score or 0.0), float(signal_strength or 0.0))
             lead.save()
 
             if company_fit_score > 0 or query_score > 0:
-                print(f"[LEAD SCORING] {lead.company or 'unknown'}: final={final_score:.2f} | company_fit={company_fit_score:.2f} | query={query_score:.2f} | signal={signal_strength:.2f}")
+                print(
+                    f"[LEAD SCORING] {lead.company or 'unknown'}: "
+                    f"total={total_score} grade={score_card.get('grade')} "
+                    f"final={final_score:.2f} company_fit={company_fit_score:.2f} "
+                    f"query={query_score:.2f} signal={signal_strength:.2f}"
+                )
 
-            scored_best_by_key[dedupe_key] = (lead, final_score)
+            scored_best_by_key[dedupe_key] = (lead, sort_key)
         
         scored_leads = list(scored_best_by_key.values())
         scored_leads.sort(key=lambda x: x[1], reverse=True)

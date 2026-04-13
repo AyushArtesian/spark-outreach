@@ -1,8 +1,11 @@
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { Users, Send, Eye, MessageSquare, Flame, Rocket, TrendingUp, TrendingDown, ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { Link } from "react-router-dom";
+import { leadsAPI } from "@/services/api";
+import { toast } from "@/hooks/use-toast";
 
 const stats = [
   { label: "Total Prospects", value: "12,480", change: "+12.3%", up: true, icon: Users },
@@ -45,8 +48,89 @@ const container = { hidden: {}, show: { transition: { staggerChildren: 0.05 } } 
 const item = { hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0 } };
 
 export default function DashboardPage() {
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanId, setScanId] = useState<string | null>(null);
+  const [scanMessage, setScanMessage] = useState<string>("");
+
+  const pollScanStatus = async () => {
+    try {
+      const statusPayload = await leadsAPI.getScanStatus();
+      const status = String(statusPayload?.status || "idle");
+      if (status === "complete") {
+        setIsScanning(false);
+        const summary = statusPayload?.summary || {};
+        toast({
+          title: "Intent scan complete",
+          description: `Found ${summary.new_leads_found || 0} new leads (${summary.hot_leads || 0} hot).`,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to poll scan status", error);
+      setIsScanning(false);
+      toast({
+        title: "Scan status failed",
+        description: "Could not fetch scan status. Try again.",
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!isScanning) return;
+
+    pollScanStatus();
+    const intervalId = window.setInterval(() => {
+      pollScanStatus();
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [isScanning]);
+
+  const handleRunScan = async () => {
+    if (isScanning) return;
+    try {
+      const payload = await leadsAPI.runIntentScan();
+      setScanId(String(payload?.scan_id || ""));
+      setScanMessage(String(payload?.message || "Intent scan started"));
+      setIsScanning(true);
+      toast({
+        title: "Scanning job boards",
+        description: "Looking for new intent-rich leads.",
+      });
+    } catch (error) {
+      console.error("Failed to run intent scan", error);
+      toast({
+        title: "Scan failed to start",
+        description: "Please retry in a moment.",
+      });
+    }
+  };
+
   return (
     <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-display font-bold text-foreground">Dashboard</h1>
+          <p className="text-sm text-muted-foreground">Monitor outreach and discover new leads daily.</p>
+        </div>
+        <Button onClick={handleRunScan} disabled={isScanning} className="gap-2">
+          {isScanning ? (
+            <>
+              <div className="w-4 h-4 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
+              Scanning job boards...
+            </>
+          ) : (
+            <>Find New Leads</>
+          )}
+        </Button>
+      </div>
+
+      {isScanning && (
+        <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-foreground">
+          Scanning job boards... {scanMessage || "In progress"}
+          {scanId ? ` (Scan ID: ${scanId})` : ""}
+        </div>
+      )}
+
       {/* Stats */}
       <motion.div variants={container} initial="hidden" animate="show" className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {stats.map((s) => (

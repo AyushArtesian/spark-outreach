@@ -18,6 +18,9 @@ class Lead(Document):
     # Lead Data
     raw_data = DictField()  # Original scraped/imported data
     enriched_data = DictField()  # Enriched lead information
+    score = DictField()  # Structured score card (optional)
+    enrichment = DictField()  # Structured enrichment payload (optional)
+    emails = ListField(DictField(), default=list)  # Generated email history (optional)
     
     # AI/RAG Information
     embeddings = ListField(FloatField())  # Vector embeddings (stored as list of floats)

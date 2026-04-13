@@ -79,6 +79,12 @@ def _clean_search_keywords(value: str) -> str:
     if not text:
         return ""
 
+    # Remove common filter scaffolding phrases that pollute Apollo q_keywords.
+    text = re.sub(r"\bin\s+all\s+industries\b", " ", text)
+    text = re.sub(r"\bwith\s+size\s+all\s+sizes\b", " ", text)
+    text = re.sub(r"\ball\s+industries\b", " ", text)
+    text = re.sub(r"\ball\s+sizes\b", " ", text)
+
     text = re.sub(r"\b(find|search|companies|people|contacts|located|near|around|that|need)\b", " ", text)
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -129,6 +135,9 @@ class ApolloService:
         self.base_url = settings.APOLLO_BASE_URL.rstrip("/")
         self.access_blocked_reason = ""
         self.access_blocked_logged = False
+        self.credits_exhausted_reason = ""
+        self.credits_exhausted_logged = False
+        self.last_run_credit_exhausted = False
 
     @property
     def enabled(self) -> bool:
@@ -185,11 +194,20 @@ class ApolloService:
                     if response.status in (401, 403):
                         preview = await response.text()
                         error_code = ""
+                        lowered_preview = preview.lower()
                         try:
                             parsed = json.loads(preview)
                             error_code = str(parsed.get("error_code") or "").strip()
                         except Exception:
                             error_code = ""
+
+                        if "insufficient credits" in lowered_preview or "lead credits" in lowered_preview:
+                            self.credits_exhausted_reason = "Apollo credits exhausted."
+                            self.last_run_credit_exhausted = True
+                            if not self.credits_exhausted_logged:
+                                print("[APOLLO] Credits exhausted. Falling back to non-Apollo discovery sources.")
+                                self.credits_exhausted_logged = True
+                            return None
 
                         if response.status == 403 and error_code == "API_INACCESSIBLE":
                             self.access_blocked_reason = f"Apollo plan cannot access endpoint {path}."
@@ -206,6 +224,14 @@ class ApolloService:
 
                     if response.status == 422:
                         preview = await response.text()
+                        lowered_preview = preview.lower()
+                        if "insufficient credits" in lowered_preview or "lead credits" in lowered_preview:
+                            self.credits_exhausted_reason = "Apollo credits exhausted."
+                            self.last_run_credit_exhausted = True
+                            if not self.credits_exhausted_logged:
+                                print("[APOLLO] Credits exhausted. Falling back to non-Apollo discovery sources.")
+                                self.credits_exhausted_logged = True
+                            return None
                         print(f"[APOLLO] Validation error path={path} body={preview[:260]}")
                         return None
 
@@ -593,8 +619,17 @@ class ApolloService:
         max_results: int = 20,
     ) -> List[Dict[str, Any]]:
         """Search Apollo entities and return lead-like prospects."""
+        self.last_run_credit_exhausted = False
+
         if not self.enabled:
             print("[APOLLO] Skipped: APOLLO_API_KEY is not configured.")
+            return []
+
+        if self.credits_exhausted_reason:
+            self.last_run_credit_exhausted = True
+            if not self.credits_exhausted_logged:
+                print("[APOLLO] Skipped: Apollo credits exhausted. Falling back to non-Apollo discovery sources.")
+                self.credits_exhausted_logged = True
             return []
 
         if self.access_blocked_reason:

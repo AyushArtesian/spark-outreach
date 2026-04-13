@@ -44,7 +44,7 @@ export default function LeadResults() {
   const [search, setSearch] = useState("");
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
-  const [sortBy, setSortBy] = useState("score");
+  const [sortBy, setSortBy] = useState("newest");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -92,6 +92,13 @@ export default function LeadResults() {
   }
   if (sortBy === "company") {
     filtered.sort((a, b) => (a.company || "").localeCompare(b.company || ""));
+  }
+  if (sortBy === "newest") {
+    filtered.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime() || 0;
+      const dateB = new Date(b.created_at).getTime() || 0;
+      return dateB - dateA;
+    });
   }
 
   const highCount = leads.filter((l) => calculatePriority(l.company_fit_score, l.signal_score) === "High").length;
@@ -162,10 +169,19 @@ export default function LeadResults() {
                 </button>
               ))}
               <button
-                onClick={() => setSortBy(sortBy === "score" ? "company" : "score")}
+                onClick={() => {
+                  if (sortBy === "newest") {
+                    setSortBy("score");
+                  } else if (sortBy === "score") {
+                    setSortBy("company");
+                  } else {
+                    setSortBy("newest");
+                  }
+                }}
                 className="px-3 py-1.5 text-xs font-medium rounded-full border border-border/50 text-muted-foreground hover:border-primary/20 transition-all flex items-center gap-1"
               >
-                <ArrowUpDown className="w-3 h-3" /> {sortBy === "score" ? "By Score" : "A-Z"}
+                <ArrowUpDown className="w-3 h-3" />
+                {sortBy === "newest" ? "Newest" : sortBy === "score" ? "By Score" : "A-Z"}
               </button>
             </div>
           </div>

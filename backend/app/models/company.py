@@ -99,6 +99,12 @@ class CompanyProfile(Document):
     # Setup Progress
     is_complete = BooleanField(default=False)
     setup_step = StringField(default="basic_info")  # Track which step they're on
+
+    # Intent monitor status (optional, backward-compatible)
+    intent_scan_last_run = DateTimeField()
+    intent_scan_last_summary = DictField()
+    intent_scan_status = StringField(default="idle")
+    intent_scan_id = StringField()
     
     # Metadata
     created_at = DateTimeField(default=datetime.utcnow)

@@ -5,9 +5,24 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link } from "react-router-dom";
 import { toast } from "@/hooks/use-toast";
 import { leadsAPI } from "@/services/api";
+
+interface LeadScore {
+  total_score: number;
+  grade: "A" | "B" | "C" | "D";
+  breakdown: {
+    service_fit?: number;
+    intent_score?: number;
+    tech_stack?: number;
+    contact_availability?: number;
+    size_fit?: number;
+  };
+  is_hot_lead: boolean;
+  recommended_action: string;
+}
 
 interface Lead {
   id: string;
@@ -18,12 +33,37 @@ interface Lead {
   job_title?: string;
   industry?: string;
   source_url?: string;
+  raw_data?: Record<string, any>;
+  score?: LeadScore;
   company_fit_score: number;
   signal_score: number;
   signal_keywords: string[];
   status: string;
   created_at: string;
 }
+
+const GRADE_STYLES: Record<string, string> = {
+  A: "bg-[#2d6a4f] text-white",
+  B: "bg-[#0077b6] text-white",
+  C: "bg-[#e76f51] text-white",
+  D: "bg-[#6c757d] text-white",
+};
+
+const BREAKDOWN_MAX: Record<string, number> = {
+  service_fit: 30,
+  intent_score: 25,
+  tech_stack: 20,
+  contact_availability: 15,
+  size_fit: 10,
+};
+
+const BREAKDOWN_LABELS: Record<string, string> = {
+  service_fit: "Service Fit",
+  intent_score: "Intent",
+  tech_stack: "Tech Stack",
+  contact_availability: "Contact",
+  size_fit: "Size Fit",
+};
 
 const priorityConfig: Record<string, { color: string; emoji: string }> = {
   High: { color: "bg-warning/10 text-warning border-warning/20", emoji: "🔥" },
@@ -41,6 +81,9 @@ const item = { hidden: { opacity: 0, y: 10 }, show: { opacity: 1, y: 0 } };
 
 export default function AllLeads() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [hotLeads, setHotLeads] = useState<Lead[]>([]);
+  const [activeTab, setActiveTab] = useState("all");
+  const [expandedScore, setExpandedScore] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
@@ -51,18 +94,45 @@ export default function AllLeads() {
   const pageSize = 50;
   const hasMore = leads.length % pageSize === 0 && leads.length > 0;
 
+  const normalizeLead = (lead: any): Lead => {
+    const scoreCard = lead?.score || lead?.raw_data?.score_card || null;
+    const hasStructuredScore = scoreCard && typeof scoreCard === "object";
+
+    const legacyNormalized = Number(lead?.raw_data?.final_score ?? 0);
+    const legacyScore100 = Number(lead?.raw_data?.final_score_100 ?? Math.round(legacyNormalized * 100));
+
+    const score: LeadScore = hasStructuredScore
+      ? {
+          total_score: Number(scoreCard.total_score ?? 0),
+          grade: (scoreCard.grade || "D") as "A" | "B" | "C" | "D",
+          breakdown: scoreCard.breakdown || {},
+          is_hot_lead: Boolean(scoreCard.is_hot_lead),
+          recommended_action: String(scoreCard.recommended_action || "skip"),
+        }
+      : {
+          total_score: legacyScore100,
+          grade: legacyScore100 >= 70 ? "A" : legacyScore100 >= 50 ? "B" : legacyScore100 >= 30 ? "C" : "D",
+          breakdown: {},
+          is_hot_lead: legacyScore100 >= 70,
+          recommended_action: legacyScore100 >= 70 ? "contact_immediately" : legacyScore100 >= 50 ? "add_to_sequence" : legacyScore100 >= 30 ? "nurture" : "skip",
+        };
+
+    return {
+      ...lead,
+      score,
+      company_fit_score: lead.company_fit_score ?? 0,
+      signal_score: lead.signal_score ?? 0,
+      signal_keywords: lead.signal_keywords ?? [],
+    };
+  };
+
   const fetchLeads = async (skipVal: number = 0) => {
     try {
       const isLoadMore = skipVal > 0;
       if (isLoadMore) setLoadingMore(true);
       
       const data = await leadsAPI.all(skipVal, pageSize);
-      const formatted = data.map((lead: any) => ({
-        ...lead,
-        company_fit_score: lead.company_fit_score ?? 0,
-        signal_score: lead.signal_score ?? 0,
-        signal_keywords: lead.signal_keywords ?? [],
-      }));
+      const formatted = data.map((lead: any) => normalizeLead(lead));
       
       if (isLoadMore) {
         setLeads([...leads, ...formatted]);
@@ -81,8 +151,23 @@ export default function AllLeads() {
     }
   };
 
+  const fetchHotLeads = async () => {
+    try {
+      const data = await leadsAPI.hot(200);
+      const formatted = data.map((lead: any) => normalizeLead(lead));
+      setHotLeads(formatted);
+    } catch (error) {
+      console.error(error);
+      toast({
+        title: "Unable to load hot leads",
+        description: "Please try again shortly.",
+      });
+    }
+  };
+
   useEffect(() => {
     fetchLeads(0);
+    fetchHotLeads();
   }, []);
 
   const handleLoadMore = () => {
@@ -98,9 +183,11 @@ export default function AllLeads() {
     return "Low";
   };
 
-  const filtered = leads.filter((lead) => {
+  const baseLeads = activeTab === "hot" ? hotLeads : leads;
+
+  const filtered = baseLeads.filter((lead) => {
     if (search && !lead.company?.toLowerCase().includes(search.toLowerCase())) return false;
-    const priority = calculatePriority(lead.company_fit_score, lead.signal_score);
+    const priority = lead.score?.grade === "A" ? "High" : lead.score?.grade === "B" ? "Medium" : lead.score?.grade === "C" ? "Medium" : "Low";
     if (filterPriority !== "All" && priority !== filterPriority) return false;
     if (filterStatus !== "All" && lead.status !== filterStatus) return false;
     return true;
@@ -108,8 +195,8 @@ export default function AllLeads() {
 
   if (sortBy === "score") {
     filtered.sort((a, b) => {
-      const scoreA = a.company_fit_score * 0.5 + a.signal_score * 0.3;
-      const scoreB = b.company_fit_score * 0.5 + b.signal_score * 0.3;
+      const scoreA = Number(a.score?.total_score || 0);
+      const scoreB = Number(b.score?.total_score || 0);
       return scoreB - scoreA;
     });
   }
@@ -118,7 +205,7 @@ export default function AllLeads() {
     filtered.sort((a, b) => (a.company || "").localeCompare(b.company || ""));
   }
 
-  const highCount = leads.filter((l) => calculatePriority(l.company_fit_score, l.signal_score) === "High").length;
+  const highCount = hotLeads.length;
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -144,9 +231,7 @@ export default function AllLeads() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-display font-bold text-foreground">All Leads</h1>
-          <p className="text-muted-foreground text-sm mt-1">
-            {filtered.length} leads • {highCount} high priority {leads.length >= 50 ? `• more available` : ""}
-          </p>
+          <p className="text-muted-foreground text-sm mt-1">{filtered.length} leads • {highCount} hot leads (A)</p>
         </div>
         <Link to="/leads">
           <Button variant="outline" className="gap-2">
@@ -154,6 +239,14 @@ export default function AllLeads() {
           </Button>
         </Link>
       </div>
+
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList className="grid w-full max-w-md grid-cols-2">
+          <TabsTrigger value="all">All Leads</TabsTrigger>
+          <TabsTrigger value="hot">Hot Leads (A) - {hotLeads.length}</TabsTrigger>
+        </TabsList>
+        <TabsContent value={activeTab} className="mt-4" />
+      </Tabs>
 
       <Card className="border-border/50 shadow-sm">
         <CardContent className="p-4">
@@ -206,9 +299,11 @@ export default function AllLeads() {
         ) : (
           <>
             {filtered.map((lead) => {
-              const priority = calculatePriority(lead.company_fit_score, lead.signal_score);
-              const combinedScore = lead.company_fit_score * 0.5 + lead.signal_score * 0.3;
-              const scoreOut10 = Math.round(combinedScore * 10);
+              const totalScore = Number(lead.score?.total_score || 0);
+              const grade = lead.score?.grade || "D";
+              const priority = grade === "A" ? "High" : grade === "B" ? "Medium" : grade === "C" ? "Medium" : "Low";
+              const isExpanded = Boolean(expandedScore[lead.id]);
+              const breakdown = lead.score?.breakdown || {};
 
               return (
                 <motion.div key={lead.id} variants={item}>
@@ -245,6 +340,27 @@ export default function AllLeads() {
                             </div>
                           </div>
 
+                          {isExpanded && (
+                            <div className="mt-3 ml-14 rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
+                              {Object.keys(BREAKDOWN_MAX).map((key) => {
+                                const max = BREAKDOWN_MAX[key];
+                                const value = Number((breakdown as any)[key] || 0);
+                                const width = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+                                return (
+                                  <div key={key}>
+                                    <div className="flex items-center justify-between text-xs mb-1">
+                                      <span className="text-muted-foreground">{BREAKDOWN_LABELS[key]}</span>
+                                      <span className="font-medium text-foreground">{value}/{max}</span>
+                                    </div>
+                                    <div className="h-2 rounded-full bg-muted overflow-hidden">
+                                      <div className="h-full bg-primary rounded-full" style={{ width: `${width}%` }} />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
                           <div className="mt-3 ml-14">
                             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">Signals</p>
                             {lead.signal_keywords && lead.signal_keywords.length > 0 ? (
@@ -263,8 +379,14 @@ export default function AllLeads() {
 
                         <div className="flex lg:flex-col items-center lg:items-end gap-3 lg:gap-2 shrink-0 lg:min-w-[160px]">
                           <div className="text-center lg:text-right">
-                            <div className="text-3xl font-display font-bold text-primary">{scoreOut10}</div>
-                            <div className="text-xs text-muted-foreground">/ 10</div>
+                            <button
+                              type="button"
+                              onClick={() => setExpandedScore((prev) => ({ ...prev, [lead.id]: !prev[lead.id] }))}
+                              className={`rounded-md px-3 py-1 text-sm font-semibold ${GRADE_STYLES[grade] || GRADE_STYLES.D}`}
+                            >
+                              {grade} - {totalScore}
+                            </button>
+                            <div className="text-xs text-muted-foreground mt-1">Score</div>
                             <div className="mt-2 space-y-0.5 text-xs">
                               <div className="flex justify-end gap-2">
                                 <span className="text-muted-foreground">Fit:</span>
@@ -300,7 +422,7 @@ export default function AllLeads() {
               <div className="flex justify-center pt-4">
                 <Button 
                   onClick={handleLoadMore} 
-                  disabled={loadingMore}
+                  disabled={loadingMore || activeTab === "hot"}
                   className="gap-2"
                 >
                   {loadingMore ? (

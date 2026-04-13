@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # SerpAPI & Serper API (for search)
     SERPAPI_KEY: Optional[str] = None
     SERPER_API_KEY: Optional[str] = None
+
+    # Optional enrichment APIs
+    WAPPALYZER_API_KEY: Optional[str] = None
+    HUNTER_API_KEY: Optional[str] = None
     
     # CORS
     CORS_ORIGINS: list = ["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"]

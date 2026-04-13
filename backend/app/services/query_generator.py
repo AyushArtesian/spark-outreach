@@ -5,6 +5,25 @@ from typing import Optional, List, Dict, Any
 from app.utils.json_utils import sanitize_queries
 
 
+LOCATION_ALIASES = {
+    "gurgoan": "gurgaon",
+    "gurugram": "gurgaon",
+    "banglore": "bangalore",
+    "bengalure": "bangalore",
+    "new delhi": "delhi",
+}
+
+
+def _normalize_location_text(value: Optional[str]) -> str:
+    text = (value or "").strip().lower()
+    if not text:
+        return ""
+    normalized = text
+    for src, dst in LOCATION_ALIASES.items():
+        normalized = normalized.replace(src, dst)
+    return normalized
+
+
 def build_high_intent_fallback_queries(
     user_query: str,
     filters: Optional[Dict[str, Any]],
@@ -30,6 +49,7 @@ def build_high_intent_fallback_queries(
         target_locs = profile.get("target_locations") or []
         if target_locs:
             location = str(target_locs[0]).strip()
+    location = _normalize_location_text(location) or location
 
     industry = str(filters.get("industry") or "").strip()
     if not industry or industry.lower() == "all":

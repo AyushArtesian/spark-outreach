@@ -1,18 +1,29 @@
 """
 Leads router
 """
-from fastapi import APIRouter, HTTPException, status, Header
+from fastapi import APIRouter, HTTPException, status, Header, BackgroundTasks
 from typing import List, Optional, Dict, Any
 
 from app.models.lead import Lead
 from app.models.user import User
 from app.models.campaign import Campaign
-from app.schemas.lead import LeadCreate, LeadUpdate, LeadResponse, LeadDetailResponse, BulkLeadCreate
+from app.schemas.lead import (
+    LeadCreate,
+    LeadUpdate,
+    LeadResponse,
+    LeadDetailResponse,
+    BulkLeadCreate,
+    LeadScore,
+    LeadEnrichment,
+    GeneratedEmail,
+)
 from app.services.lead_service import lead_service
 from app.services.ai_service import ai_service
 from app.utils.auth import decode_token
 from app.utils.response import serialize_lead
 from pydantic import BaseModel, Field
+from datetime import datetime
+from bson import ObjectId
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -44,6 +55,59 @@ class LeadSearchResult(BaseModel):
     signal_keywords: List[str]
     status: str
     created_at: str
+
+
+class IntentScanStartResponse(BaseModel):
+    scan_id: str
+    status: str
+    message: str
+
+
+class IntentScanStatusResponse(BaseModel):
+    last_scan: Optional[str] = None
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    status: str
+    scan_id: Optional[str] = None
+
+
+def _get_company_profile_for_user(user_id: str):
+    from app.models.company import CompanyProfile
+
+    profile = None
+    try:
+        profile = CompanyProfile.objects(owner_id=ObjectId(str(user_id))).first()
+    except Exception:
+        profile = None
+
+    if not profile:
+        try:
+            profile = CompanyProfile.objects(owner_id=str(user_id)).first()
+        except Exception:
+            profile = None
+
+    return profile
+
+
+def _get_owned_lead_or_404(lead_id: str, current_user: User) -> Lead:
+    try:
+        lead = Lead.objects(id=lead_id).first()
+    except Exception:
+        lead = None
+
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead not found"
+        )
+
+    campaign = Campaign.objects(id=lead.campaign_id).first()
+    if not campaign or str(campaign.owner_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized"
+        )
+
+    return lead
 
 # Helper to get current user from JWT token
 def get_current_user_from_token(authorization: Optional[str] = Header(None)) -> User:
@@ -148,6 +212,50 @@ async def search_leads(
             detail=f"Failed to search leads: {str(e)}"
         )
 
+
+@router.post("/run-intent-scan", response_model=IntentScanStartResponse, status_code=status.HTTP_202_ACCEPTED)
+async def run_intent_scan(
+    background_tasks: BackgroundTasks,
+    authorization: Optional[str] = Header(None),
+):
+    """Trigger intent monitor scan in the background for current user."""
+    from app.services.intent_monitor import intent_monitor_service
+
+    current_user = get_current_user_from_token(authorization)
+    scan_id, already_running = await intent_monitor_service.start_scan(str(current_user.id))
+    if not already_running:
+        background_tasks.add_task(intent_monitor_service.run_daily_scan, str(current_user.id), scan_id)
+
+    return IntentScanStartResponse(
+        scan_id=scan_id,
+        status="running",
+        message="Intent scan already running" if already_running else "Intent scan started",
+    )
+
+
+@router.get("/scan-status", response_model=IntentScanStatusResponse)
+async def get_intent_scan_status(
+    authorization: Optional[str] = Header(None),
+):
+    """Get latest intent scan state for current user."""
+    from app.services.intent_monitor import intent_monitor_service
+
+    current_user = get_current_user_from_token(authorization)
+    payload = await intent_monitor_service.get_scan_status(str(current_user.id))
+
+    last_scan_raw = payload.get("last_scan")
+    if hasattr(last_scan_raw, "isoformat"):
+        last_scan = last_scan_raw.isoformat()
+    else:
+        last_scan = str(last_scan_raw) if last_scan_raw else None
+
+    return IntentScanStatusResponse(
+        last_scan=last_scan,
+        summary=payload.get("summary") or {},
+        status=str(payload.get("status") or "idle"),
+        scan_id=str(payload.get("scan_id") or "") or None,
+    )
+
 @router.post("", response_model=LeadResponse)
 async def create_lead(
     lead: LeadCreate,
@@ -231,11 +339,179 @@ async def get_all_leads(
         return []
 
     if status:
-        leads = Lead.objects(campaign_id__in=campaign_ids, status=status).skip(skip).limit(limit)
+        leads = Lead.objects(campaign_id__in=campaign_ids, status=status).order_by("-created_at").skip(skip).limit(limit)
     else:
-        leads = Lead.objects(campaign_id__in=campaign_ids).skip(skip).limit(limit)
+        leads = Lead.objects(campaign_id__in=campaign_ids).order_by("-created_at").skip(skip).limit(limit)
 
     return [serialize_lead(l) for l in leads]
+
+
+@router.get("/hot", response_model=List[LeadResponse])
+async def get_hot_leads(
+    limit: int = 50,
+    authorization: Optional[str] = Header(None),
+):
+    """Return only hot leads (grade A and total_score >= 70), sorted by score desc."""
+    current_user = get_current_user_from_token(authorization)
+    safe_limit = max(1, min(200, int(limit or 50)))
+
+    user_campaigns = Campaign.objects(owner_id=str(current_user.id))
+    campaign_ids = [str(c.id) for c in user_campaigns]
+    if not campaign_ids:
+        return []
+
+    leads = Lead.objects(campaign_id__in=campaign_ids)
+    ranked: List[tuple[Lead, int]] = []
+
+    for lead in leads:
+        score_payload = lead.score if isinstance(lead.score, dict) else {}
+        if not score_payload:
+            raw = lead.raw_data or {}
+            fallback = raw.get("score_card")
+            if isinstance(fallback, dict):
+                score_payload = fallback
+
+        total_score = int(score_payload.get("total_score", 0) or 0)
+        grade = str(score_payload.get("grade") or "")
+        if total_score >= 70 and grade == "A":
+            ranked.append((lead, total_score))
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    selected = [lead for lead, _ in ranked[:safe_limit]]
+    return [serialize_lead(lead) for lead in selected]
+
+
+@router.post("/{lead_id}/generate-email", response_model=GeneratedEmail)
+async def generate_lead_email(
+    lead_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """Generate and persist a cold email for one lead using Groq email generator."""
+    from app.services.email_generator import email_generator_service
+
+    current_user = get_current_user_from_token(authorization)
+    lead = _get_owned_lead_or_404(lead_id, current_user)
+
+    company_profile = _get_company_profile_for_user(str(current_user.id))
+    if not company_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Company profile not found. Complete company setup first."
+        )
+
+    generated = await email_generator_service.generate_cold_email(lead, company_profile)
+    email_payload = GeneratedEmail(
+        subject=str(generated.get("subject") or "").strip(),
+        body=str(generated.get("body") or "").strip(),
+        personalization_score=int(generated.get("personalization_score", 1) or 1),
+        generated_at=datetime.utcnow(),
+        email_type="cold",
+    )
+
+    lead.emails = list(lead.emails or [])
+    lead.emails.append(email_payload.model_dump())
+    lead.ai_generated_message = f"Subject: {email_payload.subject}\n\n{email_payload.body}".strip()
+    lead.raw_data = lead.raw_data or {}
+    lead.raw_data["generated_email"] = email_payload.model_dump()
+    lead.updated_at = datetime.utcnow()
+    lead.save()
+
+    return email_payload
+
+
+@router.post("/{lead_id}/enrich", response_model=LeadDetailResponse)
+async def enrich_single_lead(
+    lead_id: str,
+    authorization: Optional[str] = Header(None),
+):
+    """Manually trigger enrichment and score refresh for a specific lead."""
+    from app.services.enrichment_service import enrichment_service
+
+    current_user = get_current_user_from_token(authorization)
+    lead = _get_owned_lead_or_404(lead_id, current_user)
+
+    raw = lead.raw_data or {}
+    source_url = raw.get("source_url") or raw.get("company_website") or ""
+    enrichment_payload = await enrichment_service.enrich_lead(
+        {
+            "company_name": lead.company,
+            "company_website": source_url,
+            "source_url": source_url,
+            "industry": lead.industry,
+            "location": raw.get("detected_location") or raw.get("location") or "",
+            "intent_signal": raw.get("intent_signal") or "",
+            "source": raw.get("source") or "",
+        }
+    )
+
+    tech_stack = enrichment_payload.get("tech_stack", {}) if isinstance(enrichment_payload.get("tech_stack"), dict) else {}
+    decision_maker = enrichment_payload.get("decision_maker", {}) if isinstance(enrichment_payload.get("decision_maker"), dict) else {}
+    company_signals = enrichment_payload.get("company_signals", {}) if isinstance(enrichment_payload.get("company_signals"), dict) else {}
+
+    technologies = tech_stack.get("technologies", []) if isinstance(tech_stack.get("technologies", []), list) else []
+    recent_signals: List[str] = []
+    if company_signals.get("recent_funding"):
+        recent_signals.append("recent_funding")
+    if company_signals.get("expansion_news"):
+        recent_signals.append("expansion_news")
+    if company_signals.get("new_product"):
+        recent_signals.append("new_product")
+    recent_signals.extend([str(item) for item in (company_signals.get("news_snippets") or [])[:3] if str(item).strip()])
+
+    enrichment_model = LeadEnrichment(
+        tech_stack=[str(item) for item in technologies if str(item).strip()],
+        uses_microsoft_stack=bool(tech_stack.get("uses_microsoft_stack", False)),
+        ecommerce_platform=str(tech_stack.get("ecommerce_platform") or "").strip() or None,
+        decision_maker=decision_maker if decision_maker else None,
+        recent_signals=recent_signals,
+        signal_strength=int(company_signals.get("signal_strength", 0) or 0),
+    )
+
+    lead.enrichment = enrichment_model.model_dump()
+    lead.enriched_data = {
+        "tech_stack": tech_stack,
+        "decision_maker": decision_maker,
+        "company_signals": company_signals,
+        "enriched_at": enrichment_payload.get("enriched_at", ""),
+    }
+    lead.raw_data = lead.raw_data or {}
+    lead.raw_data["tech_stack"] = tech_stack
+    lead.raw_data["decision_maker"] = decision_maker
+    lead.raw_data["company_signals"] = company_signals
+
+    company_profile = _get_company_profile_for_user(str(current_user.id))
+    score_payload = await lead_service.calculate_lead_score(
+        lead=lead,
+        company_profile=company_profile,
+        service_hints=(lead.raw_data or {}).get("service_focus") or (company_profile.services if company_profile else []),
+    )
+    score_model = LeadScore(**score_payload)
+    lead.score = score_model.model_dump()
+    lead.raw_data["score_card"] = score_model.model_dump()
+    lead.raw_data["final_score_100"] = score_model.total_score
+    lead.raw_data["final_score"] = round(score_model.total_score / 100.0, 4)
+    lead.raw_data["recommended_action"] = score_model.recommended_action
+    lead.raw_data["is_hot_lead"] = score_model.is_hot_lead
+
+    lead.updated_at = datetime.utcnow()
+    lead.save()
+
+    lead_raw = lead.raw_data or {}
+    serialized = serialize_lead(lead)
+    serialized.update({
+        "raw_data": lead_raw,
+        "enriched_data": lead.enriched_data or {},
+        "company_fit_score": float(lead.company_fit_score or 0.0),
+        "signal_score": float(lead.signal_score or 0.0),
+        "signal_keywords": lead.signal_keywords or [],
+        "reason": lead_raw.get("final_reason", []),
+        "score": lead.score or lead_raw.get("score_card"),
+        "ai_generated_message": lead.ai_generated_message,
+        "ai_notes": lead.ai_notes,
+        "contacted_at": lead.contacted_at,
+        "replied_at": lead.replied_at,
+    })
+    return serialized
 
 @router.get("/campaign/{campaign_id}", response_model=List[LeadResponse])
 async def get_campaign_leads(
@@ -298,7 +574,7 @@ async def get_lead(
         "signal_score": float(lead.signal_score or 0.0),
         "signal_keywords": lead.signal_keywords or [],
         "reason": lead_raw.get("final_reason", []),
-        "score": round(float(lead_raw.get("final_score", 0.0) or 0.0) * 10.0, 2),
+        "score": lead.score or lead_raw.get("score_card"),
         "ai_generated_message": lead.ai_generated_message,
         "ai_notes": lead.ai_notes,
         "contacted_at": lead.contacted_at,
@@ -361,10 +637,37 @@ async def contact_lead(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized"
         )
-    
-    # Generate personalized message
-    message = await ai_service.generate_lead_message(lead, campaign)
+
+    # Generate personalized message using intent-aware cold email for hot leads.
+    message = ""
+    try:
+        from app.models.company import CompanyProfile
+        from app.services.email_generator import email_generator_service
+
+        company_profile = CompanyProfile.objects(owner_id=current_user.id).first()
+        lead_raw = lead.raw_data or {}
+        score_100 = lead_raw.get("final_score_100")
+        if score_100 is None:
+            try:
+                score_100 = int(float(lead_raw.get("final_score", 0.0) or 0.0) * 100)
+            except Exception:
+                score_100 = 0
+
+        if company_profile and int(score_100 or 0) >= 60:
+            generated_email = await email_generator_service.generate_cold_email(lead, company_profile)
+            subject = str(generated_email.get("subject") or "").strip()
+            body = str(generated_email.get("body") or "").strip()
+            message = f"Subject: {subject}\n\n{body}".strip()
+            lead.raw_data = lead.raw_data or {}
+            lead.raw_data["generated_email"] = generated_email
+        else:
+            message = await ai_service.generate_lead_message(lead, campaign)
+    except Exception as e:
+        print(f"[CONTACT] Intent email generation failed: {e}")
+        message = await ai_service.generate_lead_message(lead, campaign)
+
     lead.ai_generated_message = message
+    lead.save()
     
     # Mark as contacted
     updated_lead = lead_service.mark_as_contacted(lead_id)
