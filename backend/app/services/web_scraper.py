@@ -78,6 +78,96 @@ def _clean_search_query_text(raw_query: str) -> str:
     return text
 
 
+def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
+    """Validate that planner output is an executable web search query, not meta/instructional text."""
+    text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not text or len(text.split()) < 5:
+        return False
+
+    if text.count('"') % 2 != 0:
+        return False
+
+    if "series a\" b\"" in text or "series a b" in text:
+        return False
+
+    blocked_fragments = [
+        "original queries mention",
+        "queries mention things like",
+        "things like",
+        "return only json",
+        "output only json",
+        "json schema",
+        "query_text",
+        "rules:",
+        "example good",
+        "example bad",
+        "rewrite these queries",
+        "current queries:",
+        "etc",
+    ]
+    if any(fragment in text for fragment in blocked_fragments):
+        return False
+
+    # Overly quoted query strings become too restrictive and often yield zero results.
+    if text.count('"') > 6:
+        return False
+
+    # Require at least one intent/live-market trigger.
+    intent_triggers = [
+        "hiring",
+        "funded",
+        "series",
+        "rfp",
+        "request for proposal",
+        "procurement",
+        "migration",
+        "modernization",
+        "implementation",
+        "partner",
+        "growth",
+        "expansion",
+        "2026",
+        "this year",
+        "recent",
+        "now",
+    ]
+    if not any(token in text for token in intent_triggers):
+        return False
+
+    if location:
+        location_hint = _normalize_location_text(location) or str(location).strip().lower()
+        if location_hint and location_hint not in text:
+            return False
+
+    return True
+
+
+def _normalize_planned_query_for_search(query: str) -> str:
+    """Repair malformed LLM query text so search providers receive executable syntax."""
+    text = str(query or "").strip().lower()
+    if not text:
+        return ""
+
+    text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\bor\b", "OR", text, flags=re.IGNORECASE)
+
+    # Common malformed LLM pattern: '"series a" b"' -> '"series a" OR "series b"'
+    text = re.sub(
+        r'"series\s*a"\s*b"',
+        '"series a" OR "series b"',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if text.count('"') % 2 != 0:
+        text = text.replace('"', "")
+
+    text = re.sub(r"\bOR\s+OR\b", "OR", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    return text
+
+
 def generate_high_intent_queries(
     query: str,
     location: Optional[str] = None,
@@ -1035,6 +1125,53 @@ def _compact_query(parts: list, max_len: int = 260) -> str:
     return query[:max_len].rsplit(" ", 1)[0]
 
 
+def _relax_query_for_retry(query: str, location: Optional[str] = None, max_len: int = 180) -> str:
+    """Loosen over-constrained SERP query when first attempt returns zero results."""
+    raw = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not raw:
+        return ""
+
+    # Remove strict operators and negative filters first.
+    relaxed = re.sub(r"\b(?:intitle|inurl|site):[^\s]+", " ", raw)
+    relaxed = re.sub(r"(?:^|\s)-(?:jobs|careers|internship|salary)\b", " ", relaxed)
+    relaxed = relaxed.replace('"', " ")
+    relaxed = relaxed.replace("|", " or ")
+
+    tokens = [t for t in re.split(r"\W+", relaxed) if len(t) >= 3]
+    drop_tokens = {
+        "best", "top", "list", "companies", "company", "looking", "developer",
+        "consultant", "request", "demo", "quote", "services", "service",
+        "implementation", "partner", "development", "digital", "transformation",
+        "2025", "2026",
+    }
+    kept = [t for t in tokens if t not in drop_tokens]
+
+    location_tokens = [t for t in re.split(r"\W+", str(location or "").lower()) if len(t) >= 3]
+    base = [*kept[:8], *location_tokens[:2], "business", "technology"]
+    dedup: List[str] = []
+    seen = set()
+    for token in base:
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        dedup.append(token)
+
+    compact = " ".join(dedup)
+    if len(compact) > max_len:
+        compact = compact[:max_len].rsplit(" ", 1)[0]
+    return compact.strip()
+
+
+def _search_with_fallback_providers(query: str) -> Optional[List[Dict]]:
+    """Try SerpAPI first and fallback to Serper if unavailable/rate-limited."""
+    serpapi_results = _search_with_serpapi(query, max_retries=2, retry_delay=1)
+    if serpapi_results:
+        return serpapi_results
+
+    print(f"Fallback: Trying Serper for query '{query[:40]}...'")
+    return _search_with_serper(query, max_retries=2, retry_delay=1)
+
+
 def _is_valid_domain(domain: str) -> bool:
     """Validate domain format and check for blocked patterns."""
     if not domain:
@@ -1114,14 +1251,12 @@ def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2)
         retry_delay: Starting delay in seconds (exponential backoff)
     
     Returns:
-        List of search results with url, title, snippet
+        List of search results with url, title, snippet, or None if failed
     """
     # Import here to avoid circular imports
     from app.config import settings
     
-    api_key = settings.SERPAPI_KEY or settings.SERPER_API_KEY
-    if not api_key:
-        print("Warning: SERPAPI_KEY or SERPER_API_KEY not set in .env file. Using fallback search.")
+    if not settings.SERPAPI_KEY:
         return None
     
     headers = {
@@ -1131,7 +1266,7 @@ def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2)
     
     params = {
         "q": query,
-        "api_key": api_key,
+        "api_key": settings.SERPAPI_KEY,
         "num": 10,  # Get 10 results per query for filtering
         "engine": "google",
     }
@@ -1147,10 +1282,8 @@ def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2)
             )
             
             if response.status_code == 429:  # Rate limit
-                wait_time = retry_delay * (2 ** attempt)
-                print(f"SerpAPI rate limited. Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
-                continue
+                print(f"SerpAPI rate limited. Returning None to trigger Serper fallback...")
+                return None
             
             if response.status_code == 403:  # Forbidden
                 print(f"SerpAPI returned 403 Forbidden. Check API key and quota.")
@@ -1194,6 +1327,92 @@ def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2)
     return None
 
 
+def _search_with_serper(query: str, max_retries: int = 2, retry_delay: int = 2) -> Optional[List[Dict]]:
+    """Search using Serper API with exponential backoff retry logic.
+    
+    Args:
+        query: Search query string
+        max_retries: Maximum retry attempts for failed requests
+        retry_delay: Starting delay in seconds (exponential backoff)
+    
+    Returns:
+        List of search results with url, title, snippet, or None if failed
+    """
+    # Import here to avoid circular imports
+    from app.config import settings
+    
+    if not settings.SERPER_API_KEY:
+        return None
+    
+    headers = {
+        "X-API-KEY": settings.SERPER_API_KEY,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENTS[0],
+    }
+    
+    payload = {
+        "q": query,
+        "num": 10,  # Get 10 results per query for filtering
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"Serper search: query='{query[:60]}...' attempt={attempt + 1}/{max_retries}")
+            response = requests.post(
+                "https://google.serper.dev/search",
+                headers=headers,
+                json=payload,
+                timeout=12
+            )
+            
+            if response.status_code == 429:  # Rate limit
+                wait_time = retry_delay * (2 ** attempt)
+                print(f"Serper rate limited. Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+                continue
+            
+            if response.status_code == 403:  # Forbidden
+                print(f"Serper returned 403 Forbidden. Check API key and quota.")
+                return None
+            
+            if response.status_code != 200:
+                print(f"Serper returned status {response.status_code}")
+                return None
+            
+            data = response.json()
+            results = []
+            
+            # Extract organic results from Serper (different format than SerpAPI)
+            organic_results = data.get("organic", [])
+            for result in organic_results:
+                results.append({
+                    "url": result.get("link", "").strip(),
+                    "title": result.get("title", "").strip(),
+                    "snippet": result.get("snippet", "").strip(),
+                    "source": "Serper",
+                })
+            
+            print(f"Serper returned {len(results)} results for query '{query[:40]}...'")
+            return results
+        
+        except requests.exceptions.Timeout:
+            print(f"Serper timeout on attempt {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                time.sleep(wait_time)
+        except requests.exceptions.ConnectionError as e:
+            print(f"Serper connection error: {e}")
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (2 ** attempt)
+                time.sleep(wait_time)
+        except Exception as e:
+            print(f"Serper error: {e}")
+            return None
+    
+    print(f"Serper search failed after {max_retries} attempts")
+    return None
+
+
 async def discover_company_websites(
     query: str,
     location: Optional[str] = None,
@@ -1212,9 +1431,19 @@ async def discover_company_websites(
     # Merge optional LLM-planned queries with deterministic fallback.
     generated_queries = []
     seen_queries = set()
+    rejected_planned_queries = 0
 
     for candidate in (planned_queries or []):
-        normalized = _compact_query([candidate], max_len=220).strip().lower()
+        candidate_text = _normalize_planned_query_for_search(str(candidate or "").strip())
+        if not _is_valid_planned_query(candidate_text, location=location):
+            rejected_planned_queries += 1
+            print(
+                "[QUERY GENERATION: LLM] "
+                f"Rejected non-actionable query: {candidate_text[:100]}"
+            )
+            continue
+
+        normalized = _compact_query([candidate_text], max_len=220).strip().lower()
         normalized = _normalize_location_text(normalized)
         if not normalized or normalized in seen_queries:
             continue
@@ -1224,20 +1453,24 @@ async def discover_company_websites(
             break
 
     if planned_queries:
-        print(f"[QUERY GENERATION: LLM] received_planned_queries={len(planned_queries)}")
+        print(
+            "[QUERY GENERATION: LLM] "
+            f"received_planned_queries={len(planned_queries)} "
+            f"accepted={len(generated_queries)} rejected={rejected_planned_queries}"
+        )
         for idx, q in enumerate(generated_queries[:5], 1):
             print(f"[QUERY GENERATION: LLM] Query {idx}: {q}")
 
-    # Build deterministic fallback only when LLM planning returned too few usable queries.
+    # Build deterministic fallback only when LLM planning returned very few usable queries.
     heuristic_queries: List[str] = []
-    if len(generated_queries) < 5:
+    if len(generated_queries) < 2:
         heuristic_queries = generate_high_intent_queries(
             query=query_text,
             location=location,
             industry=industry,
             service_focus=service_focus,
-            min_queries=4,
-            max_queries=6,
+            min_queries=3,
+            max_queries=4,
             log_prefix="[QUERY GENERATION: HEURISTIC]",
         )
         print(
@@ -1255,7 +1488,7 @@ async def discover_company_websites(
             break
 
     query_source = "LLM" if planned_queries else "HEURISTIC"
-    if planned_queries and len(generated_queries) < 5:
+    if planned_queries and heuristic_queries:
         query_source = "LLM+HEURISTIC"
     print(
         f"[QUERY GENERATION: FINAL] source={query_source} "
@@ -1281,6 +1514,7 @@ async def discover_company_websites(
     results = []
     seen_domains = set()
     request_delay = 1.5  # 1.5 second delay between queries
+    zero_result_streak = 0
 
     try:
         for idx, search_query in enumerate(generated_queries):
@@ -1292,8 +1526,34 @@ async def discover_company_websites(
                 print(f"Waiting {request_delay}s before next query...")
                 time.sleep(request_delay)
 
-            # Try SerpAPI first (production-grade)
-            serpapi_results = _search_with_serpapi(search_query, max_retries=2, retry_delay=1)
+            active_query = search_query
+            if zero_result_streak >= 2:
+                relaxed_for_streak = _relax_query_for_retry(search_query, location=location)
+                if relaxed_for_streak and relaxed_for_streak != search_query:
+                    print(
+                        "[QUERY OPTIMIZER] "
+                        f"zero_streak={zero_result_streak}; broadening query to '{relaxed_for_streak[:70]}...'"
+                    )
+                    active_query = relaxed_for_streak
+
+            serpapi_results = _search_with_fallback_providers(active_query)
+
+            # Real-time adaptation: if a query yields no results, relax and retry once.
+            if not serpapi_results:
+                relaxed_query = _relax_query_for_retry(active_query, location=location)
+                if relaxed_query and relaxed_query != active_query:
+                    print(
+                        "[QUERY OPTIMIZER] "
+                        f"no-results -> retrying relaxed query '{relaxed_query[:70]}...'"
+                    )
+                    serpapi_results = _search_with_fallback_providers(relaxed_query)
+                else:
+                    print(f"[QUERY OPTIMIZER] no-results and query could not be relaxed: '{active_query[:70]}...'")
+
+            if serpapi_results:
+                zero_result_streak = 0
+            else:
+                zero_result_streak += 1
             
             if serpapi_results:
                 for result in serpapi_results:

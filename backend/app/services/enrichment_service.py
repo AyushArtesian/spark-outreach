@@ -152,11 +152,34 @@ class EnrichmentService:
             "ecommerce_platform": "",
             "uses_microsoft_stack": False,
             "has_contact_form": False,
+            "tech_confidence": 0.0,
+            "tech_evidence": [],
         }
 
         normalized_url = self._normalize_url(website_url)
         if not normalized_url:
             return result
+
+        confidence_by_tech: Dict[str, float] = {}
+        evidence: List[Dict[str, Any]] = []
+
+        def add_evidence(technology: str, signal: str, weight: float, source: str) -> None:
+            tech = self._clean_text(technology)
+            if not tech:
+                return
+
+            if tech not in result["technologies"]:
+                result["technologies"].append(tech)
+
+            confidence_by_tech[tech] = min(0.35, confidence_by_tech.get(tech, 0.0) + max(0.02, weight))
+            evidence.append(
+                {
+                    "technology": tech,
+                    "signal": signal[:140],
+                    "source": source,
+                    "weight": round(max(0.02, min(0.35, weight)), 3),
+                }
+            )
 
         try:
             api_result = await self._detect_with_wappalyzer(normalized_url)
@@ -164,6 +187,15 @@ class EnrichmentService:
             result["cms"] = self._clean_text(api_result.get("cms", ""))
             result["ecommerce_platform"] = self._clean_text(api_result.get("ecommerce_platform", ""))
             result["uses_microsoft_stack"] = bool(api_result.get("uses_microsoft_stack", False))
+
+            for tech in result["technologies"]:
+                add_evidence(str(tech), "Wappalyzer detected technology", 0.20, "wappalyzer")
+            if result["cms"]:
+                add_evidence(result["cms"], "Wappalyzer CMS detection", 0.22, "wappalyzer")
+            if result["ecommerce_platform"]:
+                add_evidence(result["ecommerce_platform"], "Wappalyzer ecommerce platform detection", 0.24, "wappalyzer")
+            if result["uses_microsoft_stack"]:
+                add_evidence("Microsoft Stack", "Wappalyzer Microsoft stack signal", 0.16, "wappalyzer")
         except Exception as exc:
             print(f"[ENRICHMENT] Wappalyzer stage failed for {normalized_url}: {exc}")
 
@@ -175,68 +207,94 @@ class EnrichmentService:
             html = ""
 
         if not html:
+            result["technologies"] = sorted(set(result["technologies"]))
+            confidence_score = min(1.0, sum(min(v, 0.22) for v in confidence_by_tech.values()))
+            result["tech_confidence"] = round(confidence_score, 2)
+            result["tech_evidence"] = evidence[:24]
             return result
 
         lowered = html.lower()
 
-        # Pattern-by-pattern extraction with independent guards.
-        try:
-            if "cdn.shopify.com" in lowered:
-                if "Shopify" not in result["technologies"]:
-                    result["technologies"].append("Shopify")
-                if not result["ecommerce_platform"]:
-                    result["ecommerce_platform"] = "Shopify"
-        except Exception:
-            pass
+        deterministic_patterns: List[Dict[str, Any]] = [
+            {"tech": "Shopify", "tokens": ["cdn.shopify.com", "myshopify.com", "shopify.theme"], "weight": 0.24},
+            {"tech": "WooCommerce", "tokens": ["woocommerce", "wc-ajax", "wp-json/wc"], "weight": 0.22},
+            {"tech": "Magento", "tokens": ["magento", "mage/cookies", "static/version"], "weight": 0.22},
+            {"tech": "BigCommerce", "tokens": ["cdn11.bigcommerce.com", "bigcommerce"], "weight": 0.22},
+            {"tech": "WordPress", "tokens": ["wp-content", "wp-includes", "wordpress"], "weight": 0.20},
+            {"tech": "Drupal", "tokens": ["drupal-settings-json", "sites/default/files", "drupal"], "weight": 0.18},
+            {"tech": "Webflow", "tokens": ["webflow", "wf-section", "w-webflow"], "weight": 0.18},
+            {"tech": "Wix", "tokens": ["wix.com", "wixstatic.com"], "weight": 0.18},
+            {"tech": "React", "tokens": ["react-dom", "data-reactroot", "_next/static/chunks"], "weight": 0.18},
+            {"tech": "Next.js", "tokens": ["__next", "_next/static", "next/router"], "weight": 0.20},
+            {"tech": "Vue.js", "tokens": ["vue.js", "vue.runtime", "__vue__"], "weight": 0.18},
+            {"tech": "Nuxt.js", "tokens": ["__nuxt", "nuxt.js", "_nuxt/"], "weight": 0.20},
+            {"tech": "Angular", "tokens": ["ng-version", "@angular/core", "angular.js"], "weight": 0.18},
+            {"tech": "Svelte", "tokens": ["svelte", "sveltekit"], "weight": 0.16},
+            {"tech": "Node.js", "tokens": ["node.js", "express.js", "powered by express"], "weight": 0.16},
+            {"tech": "Django", "tokens": ["csrfmiddlewaretoken", "django"], "weight": 0.20},
+            {"tech": "Flask", "tokens": ["flask", "jinja2"], "weight": 0.16},
+            {"tech": "FastAPI", "tokens": ["fastapi", "swagger ui"], "weight": 0.16},
+            {"tech": "Laravel", "tokens": ["laravel", "mix-manifest", "csrf-token"], "weight": 0.16},
+            {"tech": "ASP.NET", "tokens": ["asp.net", "__viewstate", "webresource.axd"], "weight": 0.20},
+            {"tech": ".NET", "tokens": ["dotnet", "aspnetcore"], "weight": 0.18},
+            {"tech": "Ruby on Rails", "tokens": ["ruby on rails", "rails-ujs", "_rails"], "weight": 0.16},
+            {"tech": "Spring Boot", "tokens": ["spring boot", "springframework"], "weight": 0.16},
+            {"tech": "MongoDB", "tokens": ["mongodb", "mongo"], "weight": 0.14},
+            {"tech": "PostgreSQL", "tokens": ["postgresql", "postgres"], "weight": 0.14},
+            {"tech": "MySQL", "tokens": ["mysql"], "weight": 0.12},
+            {"tech": "Redis", "tokens": ["redis"], "weight": 0.12},
+            {"tech": "AWS", "tokens": ["amazonaws.com", "cloudfront.net", "aws"], "weight": 0.14},
+            {"tech": "Google Cloud", "tokens": ["gcp", "googleapis.com", "gstatic.com"], "weight": 0.12},
+            {"tech": "Microsoft Azure", "tokens": ["azure", "azureedge.net", "windows.net"], "weight": 0.18},
+            {"tech": "Power Apps", "tokens": ["powerapps.com"], "weight": 0.24},
+            {"tech": "Dynamics 365", "tokens": ["dynamics.com", "dynamics 365"], "weight": 0.24},
+            {"tech": "HubSpot", "tokens": ["hs-scripts.com", "hubspot"], "weight": 0.12},
+            {"tech": "Salesforce", "tokens": ["salesforce", "force.com"], "weight": 0.14},
+            {"tech": "Google Tag Manager", "tokens": ["googletagmanager.com", "gtm.js"], "weight": 0.10},
+            {"tech": "Segment", "tokens": ["segment.com", "cdn.segment.com"], "weight": 0.10},
+        ]
 
-        try:
-            if "wp-content" in lowered:
-                if "WordPress" not in result["technologies"]:
-                    result["technologies"].append("WordPress")
-                if not result["cms"]:
-                    result["cms"] = "WordPress"
-        except Exception:
-            pass
+        for entry in deterministic_patterns:
+            tokens = entry.get("tokens", [])
+            for token in tokens:
+                if token in lowered:
+                    add_evidence(str(entry.get("tech", "")), f"Matched HTML token '{token}'", float(entry.get("weight", 0.1)), "html")
+                    break
 
-        try:
-            if "microsoftonline.com" in lowered:
-                if "Microsoft Online" not in result["technologies"]:
-                    result["technologies"].append("Microsoft Online")
-                result["uses_microsoft_stack"] = True
-        except Exception:
-            pass
+        if any(token in lowered for token in ["microsoftonline.com", "powerapps.com", "dynamics.com", "azure", "azureedge.net", "windows.net"]):
+            result["uses_microsoft_stack"] = True
+            add_evidence("Microsoft Stack", "Detected Microsoft ecosystem token(s)", 0.18, "html")
 
-        try:
-            if "powerapps.com" in lowered:
-                if "Power Apps" not in result["technologies"]:
-                    result["technologies"].append("Power Apps")
-                result["uses_microsoft_stack"] = True
-        except Exception:
-            pass
+        if not result["ecommerce_platform"]:
+            if any(token in lowered for token in ["cdn.shopify.com", "myshopify.com", "shopify.theme"]):
+                result["ecommerce_platform"] = "Shopify"
+            elif any(token in lowered for token in ["woocommerce", "wc-ajax", "wp-json/wc"]):
+                result["ecommerce_platform"] = "WooCommerce"
+            elif any(token in lowered for token in ["magento", "mage/cookies", "static/version"]):
+                result["ecommerce_platform"] = "Magento"
 
-        try:
-            if "dynamics.com" in lowered:
-                if "Dynamics 365" not in result["technologies"]:
-                    result["technologies"].append("Dynamics 365")
-                result["uses_microsoft_stack"] = True
-        except Exception:
-            pass
+        if not result["cms"]:
+            if any(token in lowered for token in ["wp-content", "wordpress", "wp-includes"]):
+                result["cms"] = "WordPress"
+            elif any(token in lowered for token in ["drupal-settings-json", "drupal"]):
+                result["cms"] = "Drupal"
+            elif any(token in lowered for token in ["webflow", "w-webflow"]):
+                result["cms"] = "Webflow"
 
-        try:
-            if any(token in lowered for token in ["azure", "azureedge.net", "windows.net"]):
-                if "Microsoft Azure" not in result["technologies"]:
-                    result["technologies"].append("Microsoft Azure")
-                result["uses_microsoft_stack"] = True
-        except Exception:
-            pass
+        if result["ecommerce_platform"]:
+            add_evidence(result["ecommerce_platform"], "Ecommerce platform selected from deterministic patterns", 0.16, "derived")
+        if result["cms"]:
+            add_evidence(result["cms"], "CMS selected from deterministic patterns", 0.14, "derived")
 
-        try:
-            if "<form" in lowered and any(token in lowered for token in ["contact", "get in touch", "request a demo", "get a quote"]):
-                result["has_contact_form"] = True
-        except Exception:
-            pass
+        if "<form" in lowered and any(token in lowered for token in ["contact", "get in touch", "request a demo", "get a quote", "book a call"]):
+            result["has_contact_form"] = True
 
         result["technologies"] = sorted(set(result["technologies"]))
+        confidence_score = min(1.0, sum(min(v, 0.22) for v in confidence_by_tech.values()))
+        if result["has_contact_form"]:
+            confidence_score = min(1.0, confidence_score + 0.05)
+        result["tech_confidence"] = round(confidence_score, 2)
+        result["tech_evidence"] = evidence[:30]
         return result
 
     async def _find_with_hunter(self, domain: str) -> Dict[str, Any]:
@@ -556,6 +614,8 @@ class EnrichmentService:
             "ecommerce_platform": "",
             "uses_microsoft_stack": False,
             "has_contact_form": False,
+            "tech_confidence": 0.0,
+            "tech_evidence": [],
         }
         default_decision = {
             "name": "",

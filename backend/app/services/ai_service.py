@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import warnings
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
@@ -17,6 +18,7 @@ from app.services.query_generator import build_high_intent_fallback_queries
 from app.services.query_scorer import (
     estimate_search_effectiveness,
     extract_intent_signals,
+    is_instructional_query,
     rank_high_intent_queries,
     score_query_intent,
 )
@@ -299,6 +301,8 @@ Message:
         }
 
         location_hint = str(active_filters.get("location") or "").strip()
+        current_date = datetime.utcnow().strftime("%Y-%m-%d")
+        current_year = datetime.utcnow().year
 
         def _normalize_candidate(candidate: str) -> str:
             cleaned = re.sub(r"^[\-\*\d\)\.\:]+\s*", "", str(candidate or "").strip())
@@ -382,32 +386,112 @@ Message:
 
             return candidates
 
+        def _looks_live_market_query(candidate: str) -> bool:
+            """Accept only executable, real-time intent queries and reject meta/instruction text."""
+            cleaned = _normalize_candidate(candidate)
+            lowered = cleaned.lower()
+
+            if not cleaned or len(cleaned.split()) < 5:
+                return False
+            if is_instructional_query(cleaned):
+                return False
+            if cleaned.count('"') % 2 != 0:
+                return False
+
+            blocked_fragments = {
+                "original queries mention",
+                "things like",
+                "etc",
+                "return only json",
+                "json schema",
+                "query_text",
+                "rules:",
+                "example good",
+                "example bad",
+            }
+            if any(fragment in lowered for fragment in blocked_fragments):
+                return False
+
+            # Require at least one live buying/market trigger.
+            live_triggers = [
+                "hiring",
+                "funded",
+                "series",
+                "rfp",
+                "request for proposal",
+                "procurement",
+                "migration",
+                "modernization",
+                "implementation",
+                "partner",
+                "expansion",
+                "growth",
+                str(current_year),
+                "this year",
+                "now",
+                "recent",
+            ]
+            if not any(trigger in lowered for trigger in live_triggers):
+                return False
+
+            return True
+
+        def _filter_live_queries(candidates: List[str], max_items: int) -> List[str]:
+            accepted: List[str] = []
+            seen = set()
+
+            for candidate in candidates:
+                normalized = _normalize_candidate(str(candidate or ""))
+                if not normalized:
+                    continue
+                key = normalized.lower()
+                if key in seen:
+                    continue
+                if not _looks_live_market_query(normalized):
+                    continue
+
+                seen.add(key)
+                accepted.append(normalized)
+                if len(accepted) >= max_items:
+                    break
+
+            return accepted
+
         system_prompt = (
             "You are a principal B2B demand generation strategist. "
             "Generate high-intent, service-specific Google queries for discovering active buyers. "
-            "CRITICAL: Output valid JSON ONLY—no thinking, no markdown, no explanations. "
-            "One service focus per query batch."
+            "CRITICAL: Use real-time business context, not static templates. Queries must WORK on Google. "
+            "Output valid JSON ONLY. "
+            "One service focus per query."
         )
 
         user_prompt = (
             f"Generate {limit} high-intent Google queries for B2B lead discovery.\n"
             "Output ONLY valid JSON—no thinking tags, no markdown.\n\n"
+            f"CURRENT_DATE: {current_date}\n"
             f"REQUEST: {user_query}\n"
             f"LOCATION: {location_hint or active_filters.get('location') or ''}\n"
             f"INDUSTRY: {active_filters.get('industry') or ''}\n"
             f"PRIMARY_SERVICE: {(profile_brief.get('services') or [''])[0]}\n"
+            f"SERVICE_PORTFOLIO: {json.dumps((profile_brief.get('services') or [])[:8], ensure_ascii=True)}\n"
             f"CONTEXT: {json.dumps(top_context, ensure_ascii=True)}\n\n"
             "Rules:\n"
-            "- CRITICAL: Each query focuses on ONE SERVICE only. Do NOT combine multiple services.\n"
-            "- 10-14 words per query.\n"
+            "- CRITICAL: Queries MUST be realistic and return results. Not too many exact quotes.\n"
+            "- 8-13 words per query (achievable on Google).\n"
             "- Include target city/region in EVERY query (geo-fenced).\n"
-            "- Include 2+ buying signals per query: hiring, funding, migration, modernization, PoC, RFP, procurement, scaling.\n"
-            "- Use high-intent keywords: 'contact us', 'get a quote', 'request demo', 'implementation partner', 'consulting services'.\n"
-            "- Allowed operators ONLY: intitle:careers intitle:jobs intitle:hiring intitle:rfp inurl:careers inurl:jobs inurl:contact.\n"
-            "- Zero fake operators like intitle:seriesc or inurl:pipeline.\n"
-            "- Avoid generic: 'best companies', 'top 10', 'list of'.\n"
-            "- Avoid combining different services—each query targets ONE service.\n\n"
-            "Return JSON ONLY (no markdown, no code blocks):\n"
+            "- Diversify query situations across the set: hiring, migration, modernization, procurement, funding, expansion.\n"
+            "- Each query should represent a different buying situation; avoid same sentence template structure.\n"
+            "- Every query must include at least one live-time cue: now, this year, 2026, recently funded, actively hiring, or open RFP.\n"
+            "- Never output meta text such as 'original queries mention...', 'things like...', or explanatory prose.\n"
+            "- Mix quote usage: Use quotes ONLY for critical keywords, NOT for every phrase.\n"
+            "- Use OR operators to expand: 'hiring' OR 'recruiting', 'expansion' OR 'growth'.\n"
+            "- Include 1-2 strong buying signals: hiring, funding, expansion, RFP, implementation, modernization.\n"
+            "- Example GOOD: 'web development hiring gurgaon company'\n"
+            "- Example BAD: '\"web development\" \"hiring engineers\" \"technical stack\" \"gurgaon\"' (too many quotes).\n"
+            "- Allowed minimal operators: site:linkedin.com OR OR - (dash for exclude).\n"
+            "- ONE service per query—never mix services in same query.\n"
+            "- Avoid generic: 'best', 'top 10', 'list of'.\n\n"
+            "Return JSON ONLY:\n"
             "{\"strategy\":\"SHORT_DESCRIPTION\",\"queries\":[\"query_text_1\",\"query_text_2\",...]}"
         )
 
@@ -427,7 +511,15 @@ Message:
             )
 
             parsed = extract_json_object(raw_response)
-            raw_queries = parsed.get("queries") if isinstance(parsed, dict) else []
+            raw_queries = []
+            if isinstance(parsed, dict):
+                raw_queries = (
+                    parsed.get("queries")
+                    or parsed.get("search_queries")
+                    or parsed.get("planned_queries")
+                    or parsed.get("google_queries")
+                    or []
+                )
             if not isinstance(raw_queries, list):
                 raw_queries = []
             
@@ -438,14 +530,44 @@ Message:
                     normalized_queries.append(q)
                 elif isinstance(q, dict) and "query" in q:
                     normalized_queries.append(q["query"])
-            raw_queries = normalized_queries
+            raw_queries = _filter_live_queries(normalized_queries, max_items=limit)
 
             if not raw_queries:
-                # Groq returned non-JSON or empty queries.
-                # Skip salvage extraction (too error-prone) and use deterministic fallback instead.
+                extracted_queries = _extract_queries_from_text(raw_response, limit)
+                if extracted_queries:
+                    cleaned_from_text = sanitize_queries(extracted_queries, max_queries=limit * 2)
+                    cleaned_from_text = _filter_live_queries(cleaned_from_text, max_items=limit)
+                    ranked_from_text = rank_high_intent_queries(
+                        cleaned_from_text,
+                        location_hint=location_hint,
+                        max_queries=limit,
+                        min_score=0.50,
+                    )
+                    selected_from_text = [item.query for item in ranked_from_text]
+                    print(
+                        "[LEAD QUERY PLANNER] "
+                        f"Recovered queries from non-JSON output. selected={len(selected_from_text)}"
+                    )
+                    if selected_from_text:
+                        return {
+                            "planner": "groq",
+                            "queries": selected_from_text,
+                            "strategy": "Groq returned non-JSON; recovered query candidates from model text.",
+                            "model": settings.GROQ_MODEL,
+                            "quality_summary": {
+                                "selected_count": len(selected_from_text),
+                                "avg_score": round(
+                                    sum(item.score for item in ranked_from_text) / len(ranked_from_text),
+                                    3,
+                                )
+                                if ranked_from_text
+                                else 0.0,
+                            },
+                        }
+
                 print(
-                    "[LEAD QUERY PLANNER] Groq returned non-JSON output. "
-                    f"Using deterministic fallback. response_preview={str(raw_response)[:150]}"
+                    "[LEAD QUERY PLANNER] Groq returned empty/non-JSON output; using deterministic fallback. "
+                    f"response_preview={str(raw_response)[:150]}"
                 )
                 fallback_queries = build_high_intent_fallback_queries(
                     user_query=user_query,
@@ -463,7 +585,7 @@ Message:
                 return {
                     "planner": "groq",
                     "queries": selected_fallback,
-                    "strategy": "Groq non-JSON output; using deterministic high-intent fallback.",
+                    "strategy": "Groq output unavailable; using deterministic fallback.",
                     "model": settings.GROQ_MODEL,
                     "quality_summary": {
                         "selected_count": len(selected_fallback),
@@ -476,7 +598,8 @@ Message:
                     },
                 }
 
-            cleaned_queries = sanitize_queries(raw_queries, max_queries=limit)
+            cleaned_queries = sanitize_queries(raw_queries, max_queries=limit * 2)
+            cleaned_queries = _filter_live_queries(cleaned_queries, max_items=limit)
             ranked_queries = rank_high_intent_queries(
                 cleaned_queries,
                 location_hint=location_hint,
@@ -507,9 +630,8 @@ Message:
                 )
                 refinement_prompt = (
                     f"Rewrite these queries to strict JSON for location {location_hint or active_filters.get('location') or ''}.\n"
-                    "Rules: 10-14 words, include location in each query, 2+ buying signals, realistic operators only.\n"
-                    "Allowed operators: intitle:careers intitle:jobs intitle:hiring intitle:rfp inurl:careers inurl:jobs inurl:about.\n"
-                    "Banned operators: intitle:seriesc intitle:technical inurl:technical-debt.\n"
+                    "Rules: 8-13 words, include location in each query, different buying situations across the set.\n"
+                    "Avoid repetitive templates. Keep quote usage minimal and realistic.\n"
                     f"Industry: {active_filters.get('industry', 'all')}; "
                     f"services: {json.dumps(profile_brief.get('services', [])[:3], ensure_ascii=True)}; "
                     f"tech: {json.dumps(profile_brief.get('technologies', [])[:3], ensure_ascii=True)}.\n"
@@ -524,11 +646,14 @@ Message:
                     require_json=False,
                 )
                 refined_parsed = extract_json_object(refined_raw) or {}
-                refined_candidates = (
-                    refined_parsed.get("queries")
-                    if isinstance(refined_parsed, dict)
-                    else []
-                )
+                refined_candidates = []
+                if isinstance(refined_parsed, dict):
+                    refined_candidates = (
+                        refined_parsed.get("queries")
+                        or refined_parsed.get("search_queries")
+                        or refined_parsed.get("planned_queries")
+                        or []
+                    )
                 if not isinstance(refined_candidates, list):
                     refined_candidates = []
                 if not refined_candidates:
@@ -537,11 +662,13 @@ Message:
                         for q in _extract_queries_from_text(refined_raw, limit)
                     ]
 
-                refined_clean = sanitize_queries(refined_candidates or [], max_queries=limit)
+                refined_clean = sanitize_queries(refined_candidates or [], max_queries=limit * 2)
+                refined_clean = _filter_live_queries(refined_clean, max_items=limit)
                 combined_clean = sanitize_queries(
                     cleaned_queries + refined_clean,
                     max_queries=limit * 2,
                 )
+                combined_clean = _filter_live_queries(combined_clean, max_items=limit * 2)
                 ranked_queries = rank_high_intent_queries(
                     combined_clean,
                     location_hint=location_hint,

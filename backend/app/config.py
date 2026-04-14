@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     # Lead discovery query planning
     LEAD_QUERY_PLANNER_ENABLED: bool = True
-    LEAD_QUERY_PLANNER_MAX_QUERIES: int = 10
+    LEAD_QUERY_PLANNER_MAX_QUERIES: int = 5
     
     # Hugging Face Inference API (for embeddings)
     HF_API_KEY: Optional[str] = None

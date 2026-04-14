@@ -18,6 +18,7 @@ interface Lead {
   industry?: string;
   source_url?: string;
   company_summary?: string;
+  score?: number;
   company_fit_score: number;
   signal_score: number;
   signal_keywords: string[];
@@ -44,7 +45,7 @@ export default function LeadResults() {
   const [search, setSearch] = useState("");
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
-  const [sortBy, setSortBy] = useState("newest");
+  const [sortBy, setSortBy] = useState("score");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -75,6 +76,13 @@ export default function LeadResults() {
     return "Low";
   };
 
+  const getQualityScore = (lead: Lead): number => {
+    if (typeof lead.score === "number" && Number.isFinite(lead.score)) {
+      return lead.score;
+    }
+    return (lead.company_fit_score * 0.5 + lead.signal_score * 0.3) * 10;
+  };
+
   let filtered = leads.filter((l) => {
     if (search && !l.company?.toLowerCase().includes(search.toLowerCase())) return false;
     const priority = calculatePriority(l.company_fit_score, l.signal_score);
@@ -85,8 +93,8 @@ export default function LeadResults() {
 
   if (sortBy === "score") {
     filtered.sort((a, b) => {
-      const scoreA = a.company_fit_score * 0.5 + a.signal_score * 0.3;
-      const scoreB = b.company_fit_score * 0.5 + b.signal_score * 0.3;
+      const scoreA = getQualityScore(a);
+      const scoreB = getQualityScore(b);
       return scoreB - scoreA;
     });
   }
@@ -170,18 +178,18 @@ export default function LeadResults() {
               ))}
               <button
                 onClick={() => {
-                  if (sortBy === "newest") {
-                    setSortBy("score");
-                  } else if (sortBy === "score") {
+                  if (sortBy === "score") {
                     setSortBy("company");
-                  } else {
+                  } else if (sortBy === "company") {
                     setSortBy("newest");
+                  } else {
+                    setSortBy("score");
                   }
                 }}
                 className="px-3 py-1.5 text-xs font-medium rounded-full border border-border/50 text-muted-foreground hover:border-primary/20 transition-all flex items-center gap-1"
               >
                 <ArrowUpDown className="w-3 h-3" />
-                {sortBy === "newest" ? "Newest" : sortBy === "score" ? "By Score" : "A-Z"}
+                {sortBy === "score" ? "Quality" : sortBy === "company" ? "A-Z" : "Newest"}
               </button>
             </div>
           </div>
@@ -199,8 +207,7 @@ export default function LeadResults() {
         ) : (
           filtered.map((lead) => {
             const priority = calculatePriority(lead.company_fit_score, lead.signal_score);
-            const combinedScore = lead.company_fit_score * 0.5 + lead.signal_score * 0.3;
-            const scoreOut10 = Math.round(combinedScore * 10);
+            const scoreOut10 = Math.round(getQualityScore(lead));
 
             return (
               <motion.div key={lead.id} variants={item}>

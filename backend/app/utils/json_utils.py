@@ -6,6 +6,58 @@ import json
 from typing import Optional, Dict, Any, List
 
 
+BAD_QUERY_FRAGMENTS = {
+    "original queries mention",
+    "queries mention things like",
+    "things like",
+    "return only json",
+    "output only json",
+    "json schema",
+    "query_text",
+    "rules:",
+    "example good",
+    "example bad",
+    "rewrite these queries",
+    "current queries:",
+}
+
+
+def _normalize_query_syntax(query: str) -> str:
+    """Normalize malformed LLM query strings into executable search syntax."""
+    text = str(query or "").strip()
+    if not text:
+        return ""
+
+    # Normalize quote characters and casing around operators.
+    text = text.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\bor\b", "OR", text, flags=re.IGNORECASE)
+
+    # Repair frequent malformed funding phrase from LLM outputs.
+    text = re.sub(
+        r'"series\s*a"\s*b"',
+        '"series a" OR "series b"',
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'"series\s*a"\s+OR\s+"series\s*b"?',
+        '"series a" OR "series b"',
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # If quote count is odd, remove quotes to avoid broken engine parsing.
+    if text.count('"') % 2 != 0:
+        text = text.replace('"', "")
+
+    # Remove duplicate operators introduced by model drift.
+    text = re.sub(r"\bOR\s+OR\b", "OR", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+
+    return text
+
+
 def extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
     """
     Extract first JSON object from text, stripping Qwen think-traces.
@@ -68,6 +120,7 @@ def sanitize_queries(candidates: List[Any], max_queries: int) -> List[str]:
     Handles list of strings, dicts with 'query' key, or mixed.
     """
     result = []
+    seen = set()
     for item in (candidates or []):
         if isinstance(item, str):
             cleaned = item.strip()
@@ -76,8 +129,21 @@ def sanitize_queries(candidates: List[Any], max_queries: int) -> List[str]:
         else:
             cleaned = str(item).strip()
 
-        if cleaned and cleaned not in result:
+        cleaned = _normalize_query_syntax(cleaned)
+        lowered = cleaned.lower()
+
+        if any(fragment in lowered for fragment in BAD_QUERY_FRAGMENTS):
+            continue
+
+        if len(cleaned.split()) < 4:
+            continue
+
+        if lowered in seen:
+            continue
+
+        if cleaned:
             result.append(cleaned)
+            seen.add(lowered)
 
         if len(result) >= max_queries:
             break

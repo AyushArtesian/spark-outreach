@@ -65,7 +65,12 @@ class GroqProvider:
                 response = self.client.chat.completions.create(**request_payload)
             except Exception as e:
                 # Graceful fallback if endpoint doesn't support JSON mode
-                if "response_format" in str(e) and require_json:
+                error_text = str(e)
+                if require_json and (
+                    "response_format" in error_text
+                    or "json_validate_failed" in error_text
+                    or "Failed to validate JSON" in error_text
+                ):
                     del request_payload["response_format"]
                     response = self.client.chat.completions.create(**request_payload)
                 else:

@@ -1,6 +1,7 @@
 """
 Query intent scoring and signal extraction for lead discovery
 """
+import re
 from typing import Optional, List, Dict, Any
 from app.schemas.query_schemas import QueryScore
 
@@ -32,6 +33,40 @@ UNREALISTIC_PATTERNS = [
 # Whitelist of actually realistic operators
 WHITELIST_INTITLE = ["hiring", "careers", "jobs", "rfp", "about"]
 WHITELIST_INURL = ["careers", "jobs", "hiring", "about"]
+
+INSTRUCTIONAL_QUERY_FRAGMENTS = [
+    "original queries mention",
+    "queries mention things like",
+    "things like",
+    "return only json",
+    "output only json",
+    "json schema",
+    "query_text",
+    "rules:",
+    "example good",
+    "example bad",
+    "rewrite these queries",
+    "current queries:",
+]
+
+
+def is_instructional_query(query: str) -> bool:
+    """Detect model-meta/instructional text that should never be used as a web search query."""
+    text = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not text:
+        return True
+
+    if any(fragment in text for fragment in INSTRUCTIONAL_QUERY_FRAGMENTS):
+        return True
+
+    if re.match(r"^(generate|return|rewrite|create|provide)\b", text):
+        return True
+
+    # Catch generic prose outputs like "original queries mention ... etc"
+    if "queries" in text and "etc" in text:
+        return True
+
+    return False
 
 
 def extract_intent_signals(query: str) -> List[str]:
@@ -147,6 +182,9 @@ def score_query_intent(query: str, location_hint: Optional[str] = None) -> float
     """
     text = (query or "").lower()
     if not text:
+        return 0.0
+
+    if is_instructional_query(query):
         return 0.0
 
     score = 0.0
@@ -274,6 +312,9 @@ def rank_high_intent_queries(
     """
     ranked = []
     for query in queries:
+        if is_instructional_query(query):
+            continue
+
         intent_score = score_query_intent(query, location_hint=location_hint)
         specificity_score = score_query_specificity(query)
         

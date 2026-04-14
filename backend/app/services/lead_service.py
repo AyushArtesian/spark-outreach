@@ -189,7 +189,11 @@ class LeadService:
         query: str,
         max_queries: int = 10,
     ) -> List[str]:
-        """Build high-intent, buyer-focused SERP queries for lead discovery."""
+        """Build high-intent, buyer-focused SERP queries for lead discovery.
+        
+        Uses realistic, broad queries that actually return results on Google.
+        Avoids too many exact phrases (reduces hits to 0).
+        """
         location_text = _normalize_location_text(str(location or "").strip()) or str(location or "").strip()
         if not location_text and target_locations:
             location_text = (
@@ -211,20 +215,33 @@ class LeadService:
         seen: Set[str] = set()
 
         for service in services:
+            # IMPROVED: Realistic queries with smart quote usage - minimize exact phrases
+            # These queries are designed to ACTUALLY find results on Google
             base_patterns = [
-                f'"hire {service} developer" OR "looking for {service}" {location_text}',
-                f'"{service} implementation partner" {location_text}',
-                f'"{service} consultant" "contact us" "get a quote" {location_text}',
-                f'intitle:"{service}" "request a demo" OR "get a quote" {location_text}',
-                f'"{service}" "digital transformation" "implementation partner" {location_text} company',
+                # Pattern 1: Service + hiring signal (broad)
+                f'{service} "hiring" OR "hiring engineers" {location_text} company',
+                # Pattern 2: Service + implementation (realistic)
+                f'{service} "implementation partner" {location_text}',
+                # Pattern 3: Service + digital transformation (proven working)
+                f'"{service}" "digital transformation" {location_text}',
+                # Pattern 4: Hire service developer (unquoted service for broader match)
+                f'hire {service} developer {location_text}',
+                # Pattern 5: Service + expansion signal
+                f'{service} expansion OR growth {location_text} company',
+                # Pattern 6: Service + consulting
+                f'{service} "consulting" OR "consulting services" {location_text}',
+                # Pattern 7: Service + RFP/procurement
+                f'{service} "RFP" OR "vendor" {location_text}',
+                # Pattern 8: Service + agency/firm
+                f'{service} agency OR firm {location_text} "contact us"',
             ]
 
             service_lower = service.lower()
             if any(token in service_lower for token in ["power apps", "power platform", "power automate"]):
                 base_patterns.extend(
                     [
-                        f'"Microsoft Power Platform" "implementation partner" {location_text}',
-                        f'"Power Apps" "Power Automate" services "get a quote" {location_text}',
+                        f'Microsoft Power Platform implementation {location_text}',
+                        f'"Power Apps" OR "Power Automate" consulting {location_text}',
                     ]
                 )
 
@@ -234,14 +251,14 @@ class LeadService:
             ):
                 base_patterns.extend(
                     [
-                        f'"Shopify development" agency "get a quote" {location_text}',
-                        f'"WooCommerce" OR "Magento" development company "implementation partner" {location_text}',
+                        f'Shopify development {location_text} agency',
+                        f'WooCommerce OR Magento development {location_text} company',
                     ]
                 )
 
             for pattern in base_patterns:
-                enriched = LeadService._append_current_year(pattern, current_year)
-                enriched = LeadService._ensure_negative_filters(enriched)
+                # Add current year for freshness but avoid chaining too many exact phrases
+                enriched = f'{pattern} {current_year}'
                 key = enriched.lower()
                 if not enriched or key in seen:
                     continue
@@ -282,6 +299,7 @@ class LeadService:
     def _build_location_scope(
         requested_location: Optional[str],
         target_locations: Optional[List[str]] = None,
+        include_nearby: bool = True,
     ) -> List[str]:
         """Build normalized location tokens including nearby-city variants."""
         scope: Set[str] = set()
@@ -307,11 +325,12 @@ class LeadService:
                 for part in [p.strip() for p in token.split(",") if p.strip()]:
                     scope.add(part)
 
-            nearby = NEARBY_LOCATION_HINTS.get(normalized) or NEARBY_LOCATION_HINTS.get(lowered) or []
-            for near in nearby:
-                near_norm = _normalize_location_text(near)
-                if near_norm:
-                    scope.add(near_norm)
+            if include_nearby:
+                nearby = NEARBY_LOCATION_HINTS.get(normalized) or NEARBY_LOCATION_HINTS.get(lowered) or []
+                for near in nearby:
+                    near_norm = _normalize_location_text(near)
+                    if near_norm:
+                        scope.add(near_norm)
 
         # Remove weak tokens that cause false positives.
         return sorted([token for token in scope if len(token) >= 3])
@@ -470,6 +489,7 @@ class LeadService:
         cms = str(tech.get("cms", "")).strip().lower()
         ecommerce_platform = str(tech.get("ecommerce_platform", "")).strip()
         uses_microsoft_stack = bool(tech.get("uses_microsoft_stack", False))
+        tech_confidence = float(tech.get("tech_confidence", 0.0) or 0.0)
         fallback_text = " ".join(
             [
                 " ".join([str(t).strip().lower() for t in (tech.get("technologies") or []) if str(t).strip()]),
@@ -502,9 +522,17 @@ class LeadService:
                 overlap_hits += 1
 
         if overlap_hits >= 2:
-            return 20
+            return 20 if tech_confidence >= 0.35 else 15
         if overlap_hits == 1 or uses_microsoft_stack or bool(ecommerce_platform):
-            return 10
+            if tech_confidence >= 0.25:
+                return 10
+            return 6
+        if tech_confidence >= 0.60 and len(tech_tokens) >= 3:
+            return 6
+        if tech_confidence >= 0.40 and len(tech_tokens) >= 2:
+            return 4
+        if tech_confidence >= 0.25 and len(tech_tokens) >= 1:
+            return 2
         return 0
 
     @staticmethod
@@ -744,7 +772,9 @@ class LeadService:
         company_tech = company_profile.technologies if company_profile and company_profile.technologies else []
         company_expertise = company_profile.expertise_areas if company_profile and company_profile.expertise_areas else []
         target_locations = company_profile.target_locations if company_profile and company_profile.target_locations else []
-        location_scope = self._build_location_scope(location, target_locations)
+        requested_location_scope = self._build_location_scope(location, None, include_nearby=False)
+        profile_location_scope = self._build_location_scope(None, target_locations, include_nearby=True)
+        location_scope = sorted(set([*requested_location_scope, *profile_location_scope]))
         context_keywords = [*company_services, *company_tech, *company_expertise]
 
         planner_meta: Dict[str, Any] = {
@@ -834,30 +864,33 @@ class LeadService:
             except Exception as e:
                 print(f"Lead query planning failed: {e}")
 
-        intent_queries = self._build_buyer_intent_serp_queries(
-            service_focus=service_focus,
-            company_services=company_services,
-            location=location,
-            target_locations=target_locations,
-            query=query,
-            max_queries=10,
-        )
-        if intent_queries:
-            planned_queries = intent_queries
-            planner_meta.update(
-                {
-                    "planner": "intent_serp_templates",
-                    "model": "deterministic",
-                    "strategy": "Buyer-intent SERP patterns with yearly freshness",
-                    "planned_queries_count": len(planned_queries),
-                }
+        # Keep deterministic intent templates as LAST-RESORT fallback only.
+        # Never override valid LLM-planned queries with templates.
+        if not planned_queries:
+            intent_queries = self._build_buyer_intent_serp_queries(
+                service_focus=service_focus,
+                company_services=company_services,
+                location=location,
+                target_locations=target_locations,
+                query=query,
+                max_queries=10,
             )
-            print(
-                "[LEAD QUERY PLANNER] "
-                f"using_intent_templates planned_queries={len(planned_queries)}"
-            )
-            for idx, candidate in enumerate(planned_queries[:5], 1):
-                print(f"[LEAD QUERY PLANNER] intent_query_{idx}: {candidate}")
+            if intent_queries:
+                planned_queries = intent_queries
+                planner_meta.update(
+                    {
+                        "planner": "intent_serp_templates_fallback",
+                        "model": "deterministic",
+                        "strategy": "Fallback templates used because LLM planned queries were unavailable",
+                        "planned_queries_count": len(planned_queries),
+                    }
+                )
+                print(
+                    "[LEAD QUERY PLANNER] "
+                    f"using_intent_templates_fallback planned_queries={len(planned_queries)}"
+                )
+                for idx, candidate in enumerate(planned_queries[:5], 1):
+                    print(f"[LEAD QUERY PLANNER] fallback_query_{idx}: {candidate}")
 
         if not planned_queries:
             print("[LEAD QUERY PLANNER] Using heuristic query generation fallback.")
@@ -1035,6 +1068,7 @@ class LeadService:
             apollo_person_id = str(item.get("apollo_person_id") or "").strip()
             item_email = str(item.get("email") or "").strip().lower()
             contact_key = item_email if item_email else (f"apollo:{apollo_person_id}" if apollo_person_id else "")
+            requested_location_relaxed = False
 
             if not domain and not contact_key:
                 skipped_empty_domain += 1
@@ -1055,7 +1089,7 @@ class LeadService:
             phone = str(item.get("phone") or "").strip()
             snippet = (item.get("snippet") or "").lower()
 
-            # Enforce strict location scope (requested location + nearby aliases)
+            # Keep strict requested-city scope separate from broader profile geography.
             quick_location_text = " ".join(
                 [
                     str(item.get("title", "")),
@@ -1065,18 +1099,36 @@ class LeadService:
                     str(item.get("url", "")),
                 ]
             )
-            detected_location = self._extract_location_hit(quick_location_text, location_scope)
+            requested_location_hit = self._extract_location_hit(quick_location_text, requested_location_scope)
+            profile_location_hit = self._extract_location_hit(quick_location_text, profile_location_scope)
 
-            # Apollo already applies organization/person location filters at source.
-            # If Apollo result omits explicit city fields, retain requested city as inferred match.
-            if item_source.startswith("apollo") and location_scope and not detected_location:
-                inferred = _normalize_location_text(str(location or "").strip().lower())
-                if inferred and inferred in location_scope:
-                    detected_location = inferred
-            if item_source.startswith("job_board") and location_scope and not detected_location:
-                inferred = _normalize_location_text(str(item.get("location") or location or "").strip().lower())
-                if inferred and inferred in location_scope:
-                    detected_location = inferred
+            if item_source.startswith("apollo"):
+                apollo_location_text = " ".join(
+                    [
+                        str(item.get("location", "")),
+                        str(item.get("organization_location", "")),
+                        str(item.get("headline", "")),
+                    ]
+                )
+                if requested_location_scope and not requested_location_hit:
+                    requested_location_hit = self._extract_location_hit(apollo_location_text, requested_location_scope)
+                if profile_location_scope and not profile_location_hit:
+                    profile_location_hit = self._extract_location_hit(apollo_location_text, profile_location_scope)
+
+            if item_source.startswith("job_board"):
+                board_location_text = " ".join(
+                    [
+                        str(item.get("location", "")),
+                        str(item.get("title", "")),
+                        str(item.get("snippet", "")),
+                    ]
+                )
+                if requested_location_scope and not requested_location_hit:
+                    requested_location_hit = self._extract_location_hit(board_location_text, requested_location_scope)
+                if profile_location_scope and not profile_location_hit:
+                    profile_location_hit = self._extract_location_hit(board_location_text, profile_location_scope)
+
+            detected_location = requested_location_hit or profile_location_hit
 
             if item_source.startswith("apollo"):
                 snapshot = {
@@ -1088,24 +1140,22 @@ class LeadService:
             else:
                 snapshot = await fetch_company_profile_snapshot(item.get("url", ""))
 
-            if location_scope and not detected_location:
+            if requested_location_scope and not requested_location_hit:
                 detailed_location_text = " ".join(
                     [
                         quick_location_text,
                         str(snapshot.get("summary", "")),
                     ]
                 )
-                detected_location = self._extract_location_hit(detailed_location_text, location_scope)
-                # For web-discovered leads, if no explicit location match but location was requested,
-                # infer the location from the requested search parameter (user requested London → lead is London-relevant)
-                if not detected_location and item_source == "web_discovery" and location:
-                    inferred_location = _normalize_location_text(str(location or "").strip().lower())
-                    if inferred_location and inferred_location in location_scope:
-                        detected_location = inferred_location
-                
-                if not detected_location:
-                    skipped_location_mismatch += 1
-                    continue
+                requested_location_hit = self._extract_location_hit(detailed_location_text, requested_location_scope)
+                if profile_location_scope and not profile_location_hit:
+                    profile_location_hit = self._extract_location_hit(detailed_location_text, profile_location_scope)
+                detected_location = requested_location_hit or profile_location_hit
+
+                # Soft-gate location at discovery time: keep strong intent leads even
+                # when city token is absent from snippets/homepages.
+                if not requested_location_hit:
+                    requested_location_relaxed = True
 
             if snapshot.get("company_name"):
                 company_name = snapshot["company_name"]
@@ -1143,8 +1193,17 @@ class LeadService:
             signal_reasons = list(signal_layer.get("reason", []))
             tech_relevance = float(signal_layer.get("tech_relevance", 0.0) or 0.0)
 
-            min_signal_gate = 0.12 if item_source.startswith("apollo") else 0.18
-            if signal_confidence < min_signal_gate and tech_relevance < min_signal_gate:
+            if item_source.startswith("apollo"):
+                min_signal_gate = 0.18
+                min_tech_gate = 0.16
+            elif item_source.startswith("job_board"):
+                min_signal_gate = 0.22
+                min_tech_gate = 0.18
+            else:
+                min_signal_gate = 0.28
+                min_tech_gate = 0.24
+
+            if signal_confidence < min_signal_gate and tech_relevance < min_tech_gate:
                 skipped_no_signal += 1
                 print(
                     f"Skipping {domain or contact_key}: "
@@ -1152,6 +1211,18 @@ class LeadService:
                     f"signals={signal_keywords}"
                 )
                 continue
+
+            if requested_location_scope and requested_location_relaxed and not requested_location_hit:
+                strong_non_geo_intent = bool(
+                    profile_location_hit
+                    or item_source.startswith("apollo")
+                    or item_source.startswith("job_board")
+                    or signal_confidence >= max(0.34, min_signal_gate + 0.10)
+                    or tech_relevance >= max(0.30, min_tech_gate + 0.10)
+                )
+                if not strong_non_geo_intent:
+                    skipped_location_mismatch += 1
+                    continue
 
             # Quality scoring to keep only profile-like company leads
             quality_score = 0.0
@@ -1191,14 +1262,55 @@ class LeadService:
             if re.match(r"^\d+\s", company_name.strip().lower()):
                 quality_score -= 0.2
 
+            requested_location_score = 1.0 if requested_location_hit else 0.0
+            profile_location_score = 1.0 if profile_location_hit else 0.0
+            if requested_location_hit:
+                quality_score += 0.10
+            if profile_location_hit:
+                quality_score += 0.04
+
+            if requested_location_hit:
+                location_match_mode = "requested"
+            elif profile_location_hit:
+                location_match_mode = "profile"
+            elif requested_location_scope and requested_location_relaxed:
+                location_match_mode = "relaxed"
+            else:
+                location_match_mode = "none"
+
+            has_company_name_signal = bool(snapshot.get("company_name") and len(snapshot.get("company_name", "")) > 3)
+            has_valid_domain_signal = bool(domain and re.match(r"^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$", domain))
+            has_contact_signal = bool(snapshot.get("email") or snapshot.get("phone"))
+            has_structured_profile_signal = bool(
+                apollo_person_id
+                or str(item.get("apollo_organization_id") or "").strip()
+                or str(item.get("linkedin_url") or "").strip()
+                or str(item.get("intent_signal") or "").strip()
+                or item_source.startswith("apollo")
+                or item_source.startswith("job_board")
+            )
+
+            # Strong snapshot requires identity proof, not summary text alone.
+            has_snapshot = bool(
+                has_company_name_signal
+                and has_valid_domain_signal
+                and (has_contact_signal or has_structured_profile_signal)
+            )
+
             quality_score = max(0.0, min(1.0, quality_score))
-            has_snapshot = bool(snapshot.get("email") or snapshot.get("phone") or snapshot.get("summary"))
-            min_quality = 0.40 if has_snapshot else 0.32
             if item_source.startswith("apollo"):
-                min_quality = 0.36
+                min_quality = 0.44 if has_snapshot else 0.50
+            elif item_source.startswith("job_board"):
+                min_quality = 0.48 if has_snapshot else 0.56
+            else:
+                min_quality = 0.56 if has_snapshot else 0.66
             if quality_score < min_quality:
                 # Allow only moderate exceptions when strong business signals are present.
-                if not has_snapshot and quality_score >= 0.26 and signal_confidence >= 0.45:
+                if (
+                    not has_snapshot
+                    and quality_score >= 0.62
+                    and max(signal_confidence, tech_relevance) >= 0.70
+                ):
                     pass
                 else:
                     skipped_low_quality += 1
@@ -1272,7 +1384,18 @@ class LeadService:
                     "query": query,
                     "location": detected_location or "",
                     "detected_location": detected_location or "",
+                    "requested_location_hit": requested_location_hit or "",
+                    "profile_location_hit": profile_location_hit or "",
+                    "requested_location_relaxed": bool(location_match_mode == "relaxed"),
+                    "location_match_mode": location_match_mode,
+                    "requested_location_score": requested_location_score,
+                    "profile_location_score": profile_location_score,
+                    "has_identity_snapshot": has_snapshot,
+                    "has_contact_signal": has_contact_signal,
+                    "has_structured_profile_signal": has_structured_profile_signal,
                     "requested_location": location,
+                    "requested_location_scope": requested_location_scope,
+                    "profile_location_scope": profile_location_scope,
                     "location_scope": location_scope,
                     "search_key": search_key,
                     "service_focus": service_focus or [],
@@ -1324,6 +1447,7 @@ class LeadService:
         lead: Lead,
         query: str,
         filters: Optional[Dict[str, Any]] = None,
+        strict_query_match: bool = True,
     ) -> bool:
         """Check whether lead satisfies current search constraints (location/industry/services/query)."""
         filters = filters or {}
@@ -1352,21 +1476,36 @@ class LeadService:
         quality_score = float(lead_raw.get("discovery_quality_score", 0.0) or 0.0)
         signal_confidence = float(lead_raw.get("signal_confidence", lead.signal_score or 0.0) or 0.0)
         tech_relevance = float(lead_raw.get("tech_relevance", 0.0) or 0.0)
+        is_apollo = source.startswith("apollo")
+        is_job_board = source.startswith("job_board")
         low_value_domains = [
             "crunchbase", "tracxn", "g2", "clutch", "goodfirms", "infinityjobs",
             "naukri", "indeed", "timesjobs", "monster", "glassdoor", "justdial",
+            "sulekha", "yellowpages", "yelp", "indiamart",
         ]
         if any(d in source_url for d in low_value_domains):
             return False
 
-        # Enforce minimum quality for discovered web leads
-        if source == "web_discovery" and quality_score < 0.30:
+        # Enforce calibrated source-specific quality/signal thresholds.
+        if is_apollo:
+            min_quality = 0.36
+            min_signal = 0.12
+            min_tech = 0.10
+        elif is_job_board:
+            min_quality = 0.42
+            min_signal = 0.16
+            min_tech = 0.14
+        else:
+            min_quality = 0.48
+            min_signal = 0.20
+            min_tech = 0.18
+
+        if quality_score < min_quality:
             return False
 
-        # Enforce high-intent business signal threshold (relaxed to show more leads)
-        if source == "web_discovery" and signal_confidence < 0.10:
-            return False
-        if source == "web_discovery" and tech_relevance < 0.10:
+        # Keep parity with discovery gate: a lead can qualify via either
+        # intent signal or technical relevance.
+        if signal_confidence < min_signal and tech_relevance < min_tech:
             return False
 
         # Reject low-value headline/listing style leads
@@ -1381,9 +1520,15 @@ class LeadService:
             return False
 
         if location:
-            location_scope = LeadService._build_location_scope(
+            requested_location_scope = LeadService._build_location_scope(
                 requested_location=location,
+                target_locations=None,
+                include_nearby=False,
+            )
+            profile_location_scope = LeadService._build_location_scope(
+                requested_location=None,
                 target_locations=filters.get("target_locations") or [],
+                include_nearby=True,
             )
             location_text = " ".join(
                 [
@@ -1394,10 +1539,17 @@ class LeadService:
                     str(lead.company or ""),
                 ]
             )
-            location_hit = LeadService._extract_location_hit(location_text, location_scope)
-            if source == "web_discovery" and not location_hit:
-                return False
-            if source != "web_discovery" and not location_hit and location not in searchable:
+            requested_hit = LeadService._extract_location_hit(location_text, requested_location_scope)
+            # Keep profile geography independent from strict requested-city matching.
+            _ = LeadService._extract_location_hit(location_text, profile_location_scope)
+            if not requested_hit:
+                raw_requested_hit = str(lead_raw.get("requested_location_hit", "")).strip().lower()
+                if raw_requested_hit and raw_requested_hit in requested_location_scope:
+                    requested_hit = raw_requested_hit
+            if not requested_hit and bool(lead_raw.get("requested_location_relaxed", False)):
+                requested_hit = "__relaxed__"
+
+            if not requested_hit:
                 return False
 
         if services:
@@ -1407,11 +1559,82 @@ class LeadService:
             if service_tokens and not any(token in searchable for token in set(service_tokens)):
                 return False
 
-        # Soft query check: require at least one meaningful query token hit
-        query_tokens = [t.strip().lower() for t in re.split(r"\W+", query or "") if len(t.strip()) >= 4]
+        if not strict_query_match:
+            return True
+
+        # Weighted query check for precision: require service/location/intent weighted overlap.
+        query_tokens = [t.strip().lower() for t in re.split(r"\W+", query or "") if len(t.strip()) >= 3]
         if query_tokens:
-            hits = sum(1 for token in set(query_tokens[:12]) if token in searchable)
-            if hits == 0:
+            stopwords = {
+                "with", "from", "that", "this", "there", "their", "about", "into", "over",
+                "under", "for", "and", "the", "your", "you", "our", "are", "was", "were",
+                "all", "any", "new", "2025", "2026", "company", "companies",
+            }
+            candidate_tokens = [t for t in query_tokens if t not in stopwords]
+
+            location_tokens: Set[str] = set()
+            if location:
+                location_tokens.update(
+                    [t for t in re.split(r"\W+", str(location).lower()) if len(t) >= 3]
+                )
+            for loc in (filters.get("target_locations") or []):
+                location_tokens.update([t for t in re.split(r"\W+", str(loc).lower()) if len(t) >= 3])
+
+            service_tokens: Set[str] = set()
+            for service in services:
+                service_tokens.update([t for t in re.split(r"\W+", service) if len(t) >= 3])
+            inferred_query_services = infer_services_from_text(query, limit=4)
+            for service in inferred_query_services:
+                service_tokens.update([t for t in re.split(r"\W+", str(service).lower()) if len(t) >= 3])
+
+            intent_tokens = {
+                "hire", "hiring", "recruiting", "rfp", "proposal", "vendor", "procurement",
+                "implementation", "partner", "migration", "modernization", "consulting",
+                "digital", "transformation", "funded", "series", "expansion", "growth",
+                "scaling", "automation", "platform", "upgrade",
+            }
+
+            weighted_match = 0.0
+            strong_hits = 0
+            service_hits = 0
+            location_hits = 0
+            intent_hits = 0
+            for token in set(candidate_tokens[:20]):
+                if token not in searchable:
+                    continue
+
+                if token in location_tokens:
+                    weighted_match += 2.4
+                    strong_hits += 1
+                    location_hits += 1
+                elif token in service_tokens:
+                    weighted_match += 2.1
+                    strong_hits += 1
+                    service_hits += 1
+                elif token in intent_tokens:
+                    weighted_match += 1.3
+                    strong_hits += 1
+                    intent_hits += 1
+                else:
+                    weighted_match += 0.55
+
+            min_weighted_match = 2.2
+            if services:
+                min_weighted_match += 0.6
+            if location:
+                min_weighted_match += 0.6
+
+            if weighted_match < min_weighted_match:
+                return False
+            if strong_hits == 0 and weighted_match < (min_weighted_match + 0.8):
+                return False
+            # For rich multi-token queries, require at least two strong semantic hits.
+            if len(candidate_tokens) >= 5 and strong_hits < 2:
+                return False
+            # If query clearly implies service context, require stronger service/intent grounding.
+            if service_tokens and (service_hits + intent_hits) < 2:
+                return False
+            if location and location_tokens and location_hits == 0:
                 return False
 
         return True
@@ -1686,6 +1909,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         skipped_no_signals = 0
         skipped_low_relevance = 0
         collapsed_duplicates = 0
+        rescued_relaxed_constraints = 0
 
         apollo_only_mode = bool((filters or {}).get("apollo_only"))
         source_mode = str((filters or {}).get("source_mode") or "").strip().lower()
@@ -1705,9 +1929,24 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             enrichment_service = None
         
         for lead in all_leads:
-            if not self._lead_matches_search_constraints(lead, query, filters):
-                skipped_constraints += 1
-                continue
+            constraint_mode = "strict"
+            if not self._lead_matches_search_constraints(
+                lead,
+                query,
+                filters,
+                strict_query_match=True,
+            ):
+                if self._lead_matches_search_constraints(
+                    lead,
+                    query,
+                    filters,
+                    strict_query_match=False,
+                ):
+                    constraint_mode = "relaxed"
+                    rescued_relaxed_constraints += 1
+                else:
+                    skipped_constraints += 1
+                    continue
 
             # Re-enrich when embedding is missing/invalid or from older incompatible dimensions
             if self._is_invalid_embedding(lead.lead_embedding, expected_dim=len(query_embedding)):
@@ -1815,6 +2054,10 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             if sort_by == "combined":
                 final_score = combined_score
 
+            # Mild penalty for leads admitted via relaxed query-token fallback.
+            if constraint_mode == "relaxed":
+                final_score *= 0.90
+
             reason = []
             if score_card.get("is_hot_lead"):
                 reason.append("Hot lead score band")
@@ -1826,6 +2069,8 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 reason.append(f"Action: {score_card['recommended_action']}")
             if not reason:
                 reason.append("Scored by multi-signal lead rubric")
+            if constraint_mode == "relaxed":
+                reason.append("Relaxed query-token fallback")
 
             dedupe_key = self._lead_dedupe_key(lead)
             
@@ -1871,6 +2116,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         print(f"Lead scoring summary: "
               f"total_candidates={all_leads.count()} "
               f"skipped_constraints={skipped_constraints} "
+              f"rescued_relaxed={rescued_relaxed_constraints} "
               f"skipped_no_signals={skipped_no_signals} "
               f"skipped_low_relevance={skipped_low_relevance} "
               f"skipped_low_score={skipped_low_score} "

@@ -135,7 +135,7 @@ export default function LeadSearch() {
               services: selectedServices,
             },
             top_k: 50,
-            sort_by: "created_at",
+            sort_by: "combined",
           });
 
           // Store results in localStorage

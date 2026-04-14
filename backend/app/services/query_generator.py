@@ -70,28 +70,39 @@ def build_high_intent_fallback_queries(
     }
 
     templates = [
-        # Multi-signal: Hiring + Growth Stage
-        'intitle:careers "{industry}" "{loc}" "series a" OR "series b" "hiring engineer" "{service}"',
-        '"{industry}" "{loc}" "hiring engineers" "technical stack" "{service}"',
-        # Multi-signal: Funding + Expansion
-        '"{industry}" "{loc}" "series a" "hiring engineers" "{service}"',
-        '"{industry}" "{loc}" "series b" "scaling platform" "{service}"',
-        # Multi-signal: Migration + RFP
-        '"{industry}" "{loc}" "migration to" OR "replatform" "legacy" "vendor selection" "{service}"',
-        '"{industry}" "{loc}" "technical migration" OR "platform upgrade" "RFP" "{service}"',
-        # Multi-signal: Growth + Modernization
-        '"{industry}" "{loc}" "expanding" "modernizing" OR "digital transformation" "{service}"',
-        '"{industry}" "{loc}" "growing team" "tech upgrade" "{service}"',
-        # Multi-signal: Procurement + Scaling
-        '"{industry}" "{loc}" "vendor evaluation" OR "procurement" "scaling" "{service}"',
-        # Multi-signal: Acquisition + Technical
-        '"{industry}" "{loc}" "acquired company" OR "post-acquisition" "technology integration" "{service}"',
+        # High-intent: Hiring signals (unquoted service + specific intent + location)
+        '{service} "hiring" OR "hiring engineers" {loc} company',
+        'hire {service} developer OR engineer {loc}',
+        '{service} "hiring" technical team {loc}',
+        
+        # High-intent: Implementation/Partnership signals
+        '{service} "implementation partner" {loc}',
+        '{service} "digital transformation" {loc}',
+        '{service} "consulting" OR "consulting services" {loc} company',
+        
+        # High-intent: Funding/Growth signals
+        '{service} "funded" OR "series a" OR "series b" {loc}',
+        '{service} expansion OR growth {loc} company',
+        
+        # High-intent: Procurement/RFP signals
+        '{service} "RFP" OR "request for proposal" {loc}',
+        '{service} vendor OR "technology partner" {loc}',
+        
+        # Broad but high-intent: Company + Service + Location
+        '{service} software company {loc} "contact us" OR "get in touch"',
+        '{service} agency OR firm {loc} "request demo" OR "contact"',
+        '{service} solutions {loc} "about us"',
+        
+        # Very broad fallback: Just location + service + general signal
+        '{service} {loc} "technology" OR "software" company',
+        '{service} {loc} businesses OR "business solutions"',
     ]
 
     generated = []
     for service in top_services:
         parts = {**parts_base, "service": service}
-        for template in templates[:5]:  # Use 5 templates per service for variety
+        # Use all templates (16 total) - broader approach means we can use more
+        for template in templates:
             try:
                 generated.append(template.format(**parts))
             except (KeyError, TypeError):
