@@ -10,7 +10,7 @@ from app.utils.embeddings import embedding_service
 from app.services.web_scraper import _normalize_location_text, analyze_business_signals
 from app.services.apollo_service import apollo_service
 from app.services.service_catalog import infer_services_from_text
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 from urllib.parse import urlparse
 import re
@@ -116,6 +116,51 @@ class LeadService:
         if re.search(rf"\b{year}\b", compact):
             return compact
         return f"{compact} {year}"
+
+    @staticmethod
+    def _resolve_search_industry(industry: Optional[str], query: str) -> Optional[str]:
+        """Resolve industry from filters first, then infer from query text."""
+        value = str(industry or "").strip().lower()
+        if value and value != "all":
+            return value
+
+        query_lower = str(query or "").lower()
+        industry_keywords = {
+            "e-commerce": ["e-commerce", "ecommerce", "e commerce", "retail", "marketplace", "shopping"],
+            "saas": ["saas", "software-as-a-service", "subscription"],
+            "fintech": ["fintech", "finance", "banking", "payments", "crypto"],
+            "healthcare": ["healthcare", "health", "medical", "pharma", "biotech"],
+            "edtech": ["edtech", "education", "learning", "training"],
+            "proptech": ["proptech", "real estate", "property"],
+            "logistics": ["logistics", "supply chain", "shipping", "delivery"],
+            "manufacturing": ["manufacturing", "industrial", "factory"],
+            "travel": ["travel", "tourism", "hospitality"],
+            "gaming": ["game", "gaming", "esports"],
+        }
+        for industry_name, keywords in industry_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                return industry_name
+
+        return None
+
+    @staticmethod
+    def _build_search_key(
+        location: Optional[str],
+        industry: Optional[str],
+        service_focus: Any,
+        query: str,
+    ) -> str:
+        """Build a stable signature for current search intent."""
+        services_key = "|".join(
+            sorted([str(s).strip().lower() for s in LeadService._as_service_list(service_focus) if str(s).strip()])
+        )
+        search_seed = (
+            f"{str(location or '').strip().lower()}|"
+            f"{str(industry or '').strip().lower()}|"
+            f"{services_key}|"
+            f"{str(query or '').strip().lower()}"
+        )
+        return hashlib.md5(search_seed.encode("utf-8")).hexdigest()[:12]
 
     @staticmethod
     def _ensure_negative_filters(query: str) -> str:
@@ -690,26 +735,8 @@ class LeadService:
             else None
         )
         
-        # === AUTO-EXTRACT INDUSTRY FROM SEARCH QUERY ===
-        # If no industry filter, extract from query for richer context
-        if not industry or str(industry).lower() == "all":
-            query_lower = str(query or "").lower()
-            industry_keywords = {
-                "e-commerce": ["e-commerce", "ecommerce", "e commerce", "retail", "marketplace", "shopping"],
-                "saas": ["saas", "software-as-a-service", "subscription"],
-                "fintech": ["fintech", "finance", "banking", "payments", "crypto"],
-                "healthcare": ["healthcare", "health", "medical", "pharma", "biotech"],
-                "edtech": ["edtech", "education", "learning", "training"],
-                "proptech": ["proptech", "real estate", "property"],
-                "logistics": ["logistics", "supply chain", "shipping", "delivery"],
-                "manufacturing": ["manufacturing", "industrial", "factory"],
-                "travel": ["travel", "tourism", "hospitality"],
-                "gaming": ["game", "gaming", "esports"],
-            }
-            for industry_name, keywords in industry_keywords.items():
-                if any(kw in query_lower for kw in keywords):
-                    industry = industry_name
-                    break
+        # Resolve industry using explicit filter first, then deterministic inference.
+        industry = self._resolve_search_industry(industry=industry, query=query)
         service_focus = filters.get("services") if filters else None
         company_sizes = filters.get("company_sizes") if filters else None
 
@@ -971,9 +998,12 @@ class LeadService:
             return 0
 
         # Signature for this specific search intent (location/industry/services/query)
-        services_key = "|".join(sorted([str(s).strip().lower() for s in (service_focus or []) if str(s).strip()]))
-        search_seed = f"{str(location or '').strip().lower()}|{str(industry or '').strip().lower()}|{services_key}|{str(query or '').strip().lower()}"
-        search_key = hashlib.md5(search_seed.encode("utf-8")).hexdigest()[:12]
+        search_key = self._build_search_key(
+            location=location,
+            industry=industry,
+            service_focus=service_focus or [],
+            query=query,
+        )
 
         campaign = self._get_or_create_default_campaign(owner_id)
         from app.models.campaign import Campaign
@@ -1353,7 +1383,7 @@ class LeadService:
         if location:
             location_scope = LeadService._build_location_scope(
                 requested_location=location,
-                target_locations=filters.get("target_locations") or lead_raw.get("location_scope") or [],
+                target_locations=filters.get("target_locations") or [],
             )
             location_text = " ".join(
                 [
@@ -1604,6 +1634,45 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
             campaign_ids = [str(c.id) for c in user_campaigns]
             all_leads = Lead.objects(campaign_id__in=campaign_ids)
         print(f"Lead search: owner={owner_id_str} leads_after_discovery={all_leads.count()}")
+
+        # Scope candidates to this specific search intent to avoid mixing stale historical leads.
+        filter_location_raw = (filters or {}).get("location") if filters else None
+        scoped_location = (
+            _normalize_location_text(str(filter_location_raw).strip())
+            if filter_location_raw and str(filter_location_raw).strip()
+            else None
+        )
+        scoped_industry = self._resolve_search_industry(
+            industry=(filters or {}).get("industry") if filters else None,
+            query=query,
+        )
+        scoped_services = self._as_service_list((filters or {}).get("services") or [])
+        current_search_key = self._build_search_key(
+            location=scoped_location,
+            industry=scoped_industry,
+            service_focus=scoped_services,
+            query=query,
+        )
+
+        scoped_leads = all_leads(raw_data__search_key=current_search_key)
+        scoped_count = scoped_leads.count()
+        if scoped_count > 0:
+            all_leads = scoped_leads
+            print(
+                "[LEAD SEARCH SCOPE] "
+                f"mode=search_key search_key={current_search_key} matched={scoped_count}"
+            )
+        else:
+            # Backward-compatible fallback for older leads without search_key.
+            recent_cutoff = datetime.utcnow() - timedelta(days=14)
+            recent_leads = all_leads(created_at__gte=recent_cutoff)
+            if scoped_location:
+                recent_leads = recent_leads(raw_data__requested_location=scoped_location)
+            all_leads = recent_leads
+            print(
+                "[LEAD SEARCH SCOPE] "
+                f"mode=recent_window days=14 location={scoped_location or '-'} matched={all_leads.count()}"
+            )
         
         # Apply status filter if provided
         if filters and "status" in filters:

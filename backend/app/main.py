@@ -1,12 +1,15 @@
 """
 FastAPI main application
 """
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from pymongo.errors import PyMongoError
+from mongoengine.connection import ConnectionFailure
 
 from app.config import settings
-from app.database import init_db, close_db
+from app.database import init_db, close_db, is_db_available
 from app.routers import auth_router, campaigns_router, leads_router, ai_router, company_router
 
 @asynccontextmanager
@@ -35,6 +38,30 @@ app = FastAPI(
     version="0.0.1",
     lifespan=lifespan
 )
+
+
+@app.exception_handler(PyMongoError)
+async def mongodb_exception_handler(request: Request, exc: PyMongoError):
+    """Return clean 503 responses when MongoDB is unavailable."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database unavailable. Please ensure MongoDB is running and reachable.",
+            "error": "mongodb_unavailable",
+        },
+    )
+
+
+@app.exception_handler(ConnectionFailure)
+async def mongoengine_connection_exception_handler(request: Request, exc: ConnectionFailure):
+    """Return clean 503 response when MongoEngine has no live default connection."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database unavailable. Please ensure MongoDB is running and reachable.",
+            "error": "mongodb_unavailable",
+        },
+    )
 
 # Add CORS middleware - must be added BEFORE route handlers
 app.add_middleware(
@@ -65,14 +92,22 @@ async def root():
     return {
         "message": "Welcome to Spark Outreach API",
         "version": "0.0.1",
-        "database": "MongoDB",
+        "database": "connected" if is_db_available() else "unavailable",
         "docs": "/docs"
     }
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    db_ok = is_db_available()
+    status_text = "healthy" if db_ok else "degraded"
+    return JSONResponse(
+        status_code=200 if db_ok else 503,
+        content={
+            "status": status_text,
+            "database": "connected" if db_ok else "unavailable",
+        },
+    )
 
 if __name__ == "__main__":
     import uvicorn

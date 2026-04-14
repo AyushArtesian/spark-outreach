@@ -70,8 +70,8 @@ export default function LeadResults() {
 
   const calculatePriority = (fitScore: number, signalScore: number): string => {
     const combinedScore = fitScore * 0.5 + signalScore * 0.3;
-    if (combinedScore >= 0.75) return "High";
-    if (combinedScore >= 0.5) return "Medium";
+    if (combinedScore >= 0.6) return "High";
+    if (combinedScore >= 0.35) return "Medium";
     return "Low";
   };
 

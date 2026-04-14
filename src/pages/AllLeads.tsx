@@ -187,7 +187,7 @@ export default function AllLeads() {
 
   const filtered = baseLeads.filter((lead) => {
     if (search && !lead.company?.toLowerCase().includes(search.toLowerCase())) return false;
-    const priority = lead.score?.grade === "A" ? "High" : lead.score?.grade === "B" ? "Medium" : lead.score?.grade === "C" ? "Medium" : "Low";
+    const priority = lead.score?.grade === "A" ? "High" : lead.score?.grade === "B" ? "Medium" : lead.score?.grade === "C" ? "Low" : "Low";
     if (filterPriority !== "All" && priority !== filterPriority) return false;
     if (filterStatus !== "All" && lead.status !== filterStatus) return false;
     return true;
@@ -301,7 +301,7 @@ export default function AllLeads() {
             {filtered.map((lead) => {
               const totalScore = Number(lead.score?.total_score || 0);
               const grade = lead.score?.grade || "D";
-              const priority = grade === "A" ? "High" : grade === "B" ? "Medium" : grade === "C" ? "Medium" : "Low";
+              const priority = grade === "A" ? "High" : grade === "B" ? "Medium" : grade === "C" ? "Low" : "Low";
               const isExpanded = Boolean(expandedScore[lead.id]);
               const breakdown = lead.score?.breakdown || {};
 

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     # Database - MongoDB
     MONGO_URL: str = "mongodb://localhost:27017"
     MONGO_DB_NAME: str = "spark_outreach"
-    MONGO_REQUIRED_ON_STARTUP: bool = False
+    MONGO_REQUIRED_ON_STARTUP: bool = True
     # For MongoDB Atlas: mongodb+srv://username:password@cluster.mongodb.net/spark_outreach
     
     # Security

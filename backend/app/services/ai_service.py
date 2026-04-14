@@ -383,30 +383,32 @@ Message:
             return candidates
 
         system_prompt = (
-            "You are a principal outbound strategist focused on high-ticket B2B opportunities. "
-            "Generate non-generic, high-intent Google queries for in-market buyers. "
-            "Output valid JSON only and do not include reasoning traces."
+            "You are a principal B2B demand generation strategist. "
+            "Generate high-intent, service-specific Google queries for discovering active buyers. "
+            "CRITICAL: Output valid JSON ONLY—no thinking, no markdown, no explanations. "
+            "One service focus per query batch."
         )
 
         user_prompt = (
             f"Generate {limit} high-intent Google queries for B2B lead discovery.\n"
-            "Output strict JSON only.\n\n"
+            "Output ONLY valid JSON—no thinking tags, no markdown.\n\n"
             f"REQUEST: {user_query}\n"
             f"LOCATION: {location_hint or active_filters.get('location') or ''}\n"
             f"INDUSTRY: {active_filters.get('industry') or ''}\n"
-            f"SERVICES: {json.dumps(profile_brief.get('services', []), ensure_ascii=True)}\n"
-            f"TECH: {json.dumps(profile_brief.get('technologies', []), ensure_ascii=True)}\n"
+            f"PRIMARY_SERVICE: {(profile_brief.get('services') or [''])[0]}\n"
             f"CONTEXT: {json.dumps(top_context, ensure_ascii=True)}\n\n"
             "Rules:\n"
+            "- CRITICAL: Each query focuses on ONE SERVICE only. Do NOT combine multiple services.\n"
             "- 10-14 words per query.\n"
-            "- Include target city in every query (geo-fenced).\n"
-            "- Include 2+ buying signals: hiring, funding, migration, rfp, modernization.\n"
-            "- Include at least one service/tech token from context.\n"
-            "- Allowed operators: intitle:careers intitle:jobs intitle:hiring intitle:rfp inurl:careers inurl:jobs inurl:about.\n"
-            "- Never use fake operators like intitle:seriesc or inurl:technical-debt.\n"
-            "- Avoid generic phrases: best companies, top 10, list of.\n\n"
-            "Return schema:\n"
-            "{\"strategy\":\"short text\",\"queries\":[{\"query\":\"text\",\"signal\":\"hiring|funding|migration|rfp|modernization\"}]}"
+            "- Include target city/region in EVERY query (geo-fenced).\n"
+            "- Include 2+ buying signals per query: hiring, funding, migration, modernization, PoC, RFP, procurement, scaling.\n"
+            "- Use high-intent keywords: 'contact us', 'get a quote', 'request demo', 'implementation partner', 'consulting services'.\n"
+            "- Allowed operators ONLY: intitle:careers intitle:jobs intitle:hiring intitle:rfp inurl:careers inurl:jobs inurl:contact.\n"
+            "- Zero fake operators like intitle:seriesc or inurl:pipeline.\n"
+            "- Avoid generic: 'best companies', 'top 10', 'list of'.\n"
+            "- Avoid combining different services—each query targets ONE service.\n\n"
+            "Return JSON ONLY (no markdown, no code blocks):\n"
+            "{\"strategy\":\"SHORT_DESCRIPTION\",\"queries\":[\"query_text_1\",\"query_text_2\",...]}"
         )
 
         try:
@@ -428,6 +430,15 @@ Message:
             raw_queries = parsed.get("queries") if isinstance(parsed, dict) else []
             if not isinstance(raw_queries, list):
                 raw_queries = []
+            
+            # Handle both query formats: strings and objects with {"query": "..."} 
+            normalized_queries = []
+            for q in raw_queries:
+                if isinstance(q, str):
+                    normalized_queries.append(q)
+                elif isinstance(q, dict) and "query" in q:
+                    normalized_queries.append(q["query"])
+            raw_queries = normalized_queries
 
             if not raw_queries:
                 # Groq returned non-JSON or empty queries.

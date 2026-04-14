@@ -33,13 +33,15 @@ def build_high_intent_fallback_queries(
     """
     Create deterministic high-intent queries if LLM output quality is weak.
     
-    All templates enforce 2+ signal combinations:
+    All templates enforce 2+ signal combinations per service:
     - Hiring + Growth Stage
     - Funding + Expansion
     - Migration + RFP
     - Growth + Modernization
     - Procurement + Scaling
     - Acquisition + Technical
+    
+    Generates queries for TOP 2-3 SERVICES to maximize lead discovery.
     """
     filters = filters or {}
     profile = company_profile or {}
@@ -57,12 +59,14 @@ def build_high_intent_fallback_queries(
         industry = str(industries[0]).strip() if industries else "software"
 
     services = filters.get("services") or profile.get("services") or []
-    primary_service = str(services[0]).strip() if services else "web development"
+    # Use top 2-3 services instead of just the first one
+    top_services = [str(s).strip() for s in services[:3] if str(s).strip()]
+    if not top_services:
+        top_services = ["web development"]
 
-    parts = {
+    parts_base = {
         "loc": location or "india",
         "industry": industry,
-        "service": primary_service,
     }
 
     templates = [
@@ -84,6 +88,16 @@ def build_high_intent_fallback_queries(
         '"{industry}" "{loc}" "acquired company" OR "post-acquisition" "technology integration" "{service}"',
     ]
 
-    generated = [template.format(**parts) for template in templates]
-    generated.insert(0, f'"{user_query.strip()}" "{parts["loc"]}"')
+    generated = []
+    for service in top_services:
+        parts = {**parts_base, "service": service}
+        for template in templates[:5]:  # Use 5 templates per service for variety
+            try:
+                generated.append(template.format(**parts))
+            except (KeyError, TypeError):
+                continue
+    
+    # Add primary user query with location
+    generated.insert(0, f'"{user_query.strip()}" "{parts_base["loc"]}"')
+    
     return sanitize_queries(generated, max_queries=max_queries)
