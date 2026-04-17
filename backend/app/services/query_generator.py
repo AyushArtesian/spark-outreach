@@ -32,16 +32,7 @@ def build_high_intent_fallback_queries(
 ) -> List[str]:
     """
     Create deterministic high-intent queries if LLM output quality is weak.
-    
-    All templates enforce 2+ signal combinations per service:
-    - Hiring + Growth Stage
-    - Funding + Expansion
-    - Migration + RFP
-    - Growth + Modernization
-    - Procurement + Scaling
-    - Acquisition + Technical
-    
-    Generates queries for TOP 2-3 SERVICES to maximize lead discovery.
+    Generates prospect-finding queries: companies in target industries needing these services.
     """
     filters = filters or {}
     profile = company_profile or {}
@@ -51,64 +42,79 @@ def build_high_intent_fallback_queries(
         target_locs = profile.get("target_locations") or []
         if target_locs:
             location = str(target_locs[0]).strip()
-    location = _normalize_location_text(location) or location
+    location = _normalize_location_text(location) or location or "india"
 
-    industry = str(filters.get("industry") or "").strip()
-    if not industry or industry.lower() == "all":
-        industries = profile.get("target_industries") or []
-        industry = str(industries[0]).strip() if industries else "software"
+    # Get target industries and services from profile
+    target_industries = [
+        str(ind).strip().lower() 
+        for ind in (profile.get("target_industries") or [])
+        if str(ind).strip()
+    ]
+    if not target_industries:
+        target_industries = ["software", "technology"]
 
     services = filters.get("services") or profile.get("services") or []
-    # Use top 2-3 services instead of just the first one
     top_services = [str(s).strip() for s in services[:3] if str(s).strip()]
     if not top_services:
-        top_services = ["web development"]
+        top_services = ["development"]
 
-    parts_base = {
-        "loc": location or "india",
-        "industry": industry,
-    }
+    technologies = [str(t).strip() for t in (profile.get("technologies") or []) if str(t).strip()]
 
-    templates = [
-        # High-intent: Hiring signals (unquoted service + specific intent + location)
-        '{service} "hiring" OR "hiring engineers" {loc} company',
-        'hire {service} developer OR engineer {loc}',
-        '{service} "hiring" technical team {loc}',
-        
-        # High-intent: Implementation/Partnership signals
-        '{service} "implementation partner" {loc}',
-        '{service} "digital transformation" {loc}',
-        '{service} "consulting" OR "consulting services" {loc} company',
-        
-        # High-intent: Funding/Growth signals
-        '{service} "funded" OR "series a" OR "series b" {loc}',
-        '{service} expansion OR growth {loc} company',
-        
-        # High-intent: Procurement/RFP signals
-        '{service} "RFP" OR "request for proposal" {loc}',
-        '{service} vendor OR "technology partner" {loc}',
-        
-        # Broad but high-intent: Company + Service + Location
-        '{service} software company {loc} "contact us" OR "get in touch"',
-        '{service} agency OR firm {loc} "request demo" OR "contact"',
-        '{service} solutions {loc} "about us"',
-        
-        # Very broad fallback: Just location + service + general signal
-        '{service} {loc} "technology" OR "software" company',
-        '{service} {loc} businesses OR "business solutions"',
-    ]
-
+    # Build service keywords for queries
+    service_short = " ".join(top_services[0].split()[:2]) if top_services else "development"
+    
     generated = []
-    for service in top_services:
-        parts = {**parts_base, "service": service}
-        # Use all templates (16 total) - broader approach means we can use more
-        for template in templates:
-            try:
-                generated.append(template.format(**parts))
-            except (KeyError, TypeError):
-                continue
+
+    # STRATEGY: Generate queries that find prospect companies (companies that NEED these services)
+    # not just generic service provider listings
     
-    # Add primary user query with location
-    generated.insert(0, f'"{user_query.strip()}" "{parts_base["loc"]}"')
+    # Pattern 1: Target industry + hiring signal
+    for industry in target_industries[:2]:
+        generated.append(f'{industry} companies "hiring" {service_short} engineers {location}')
+        generated.append(f'{industry} startups recruiting {service_short} developers {location}')
     
+    # Pattern 2: Target industry + funding signal
+    for industry in target_industries[:2]:
+        generated.append(f'{industry} companies "funded" OR "series a" {location} {service_short}')
+        generated.append(f'venture backed {industry} startups {location} expanding')
+    
+    # Pattern 3: Target industry + modernization/digital transformation
+    for industry in target_industries[:2]:
+        generated.append(f'{industry} "digital transformation" {location} {service_short}')
+        generated.append(f'{industry} companies modernizing legacy systems {location}')
+    
+    # Pattern 4: Target industry + expansion signals
+    generated.append(f'{target_industries[0]} companies growing {location} hiring technical talent')
+    generated.append(f'scale {target_industries[0]} platforms {location} development')
+    
+    # Pattern 5: Service-specific prospect queries
+    for service in top_services[:2]:
+        generated.append(f'{service} "implementation partner" {location} OR remote')
+        generated.append(f'{service} consulting services {location} companies')
+    
+    # Pattern 6: Technology + industry combinations (if tech stack available)
+    if technologies and target_industries:
+        tech_name = technologies[0]
+        industry_name = target_industries[0]
+        generated.append(f'{industry_name} companies using {tech_name} {location} hiring')
+        generated.append(f'{tech_name} projects {industry_name} sector {location} recruitment')
+    
+    # Pattern 7: RFP and procurement signals in target industries
+    for industry in target_industries[:1]:
+        generated.append(f'{industry} "RFP" OR "vendor selection" {location} {service_short}')
+        generated.append(f'{industry} procurement {service_short} solutions {location}')
+    
+    # Pattern 8: Job board and hiring page signals
+    for industry in target_industries[:1]:
+        generated.append(f'{industry} company careers page {service_short} {location}')
+        generated.append(f'{industry} tech jobs {location} companies hiring')
+    
+    # Pattern 9: Growth stage signals with industry focus
+    generated.append(f'post-series-a {target_industries[0]} companies {location}')
+    generated.append(f'high growth {target_industries[0]} startups {location} {service_short}')
+    
+    # Pattern 10: Primary user query with enhanced context
+    if user_query:
+        generated.insert(0, f'{user_query.strip()} {location} companies OR startups')
+
     return sanitize_queries(generated, max_queries=max_queries)

@@ -81,7 +81,7 @@ def _clean_search_query_text(raw_query: str) -> str:
 def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
     """Validate that planner output is an executable web search query, not meta/instructional text."""
     text = re.sub(r"\s+", " ", str(query or "").strip().lower())
-    if not text or len(text.split()) < 5:
+    if not text or len(text.split()) < 4:  # Reduced from 5 to 4 words
         return False
 
     if text.count('"') % 2 != 0:
@@ -112,10 +112,12 @@ def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
     if text.count('"') > 6:
         return False
 
-    # Require at least one intent/live-market trigger.
+    # Require at least one intent/live-market trigger (much broader list now)
     intent_triggers = [
         "hiring",
+        "recruiting",
         "funded",
+        "funding",
         "series",
         "rfp",
         "request for proposal",
@@ -125,18 +127,36 @@ def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
         "implementation",
         "partner",
         "growth",
+        "growing",
         "expansion",
+        "expanding",
+        "expanding",
+        "scale",
+        "scaling",
+        "startup",
+        "startups",
+        "venture",
+        "backed",
         "2026",
         "this year",
         "recent",
         "now",
+        "digital",
+        "transformation",
+        "consulting",
+        "services",
+        "solutions",
     ]
     if not any(token in text for token in intent_triggers):
         return False
 
+    # Location check is now OPTIONAL - not all queries need explicit location
+    # The system is retrying with relaxed queries anyway if they don't match
     if location:
         location_hint = _normalize_location_text(location) or str(location).strip().lower()
-        if location_hint and location_hint not in text:
+        # Much more lenient - just check if ANY location keyword appears
+        location_keywords = [location_hint] + location_hint.split() if location_hint else []
+        if location_keywords and not any(kw in text for kw in location_keywords if len(kw) >= 3):
             return False
 
     return True
@@ -1432,6 +1452,7 @@ async def discover_company_websites(
     generated_queries = []
     seen_queries = set()
     rejected_planned_queries = 0
+    accepted_planned_queries = 0
 
     for candidate in (planned_queries or []):
         candidate_text = _normalize_planned_query_for_search(str(candidate or "").strip())
@@ -1439,7 +1460,7 @@ async def discover_company_websites(
             rejected_planned_queries += 1
             print(
                 "[QUERY GENERATION: LLM] "
-                f"Rejected non-actionable query: {candidate_text[:100]}"
+                f"Rejected: {candidate_text[:100] if candidate_text else candidate}"
             )
             continue
 
@@ -1449,6 +1470,7 @@ async def discover_company_websites(
             continue
         seen_queries.add(normalized)
         generated_queries.append(normalized)
+        accepted_planned_queries += 1
         if len(generated_queries) >= 10:
             break
 
@@ -1456,7 +1478,7 @@ async def discover_company_websites(
         print(
             "[QUERY GENERATION: LLM] "
             f"received_planned_queries={len(planned_queries)} "
-            f"accepted={len(generated_queries)} rejected={rejected_planned_queries}"
+            f"accepted={accepted_planned_queries} rejected={rejected_planned_queries}"
         )
         for idx, q in enumerate(generated_queries[:5], 1):
             print(f"[QUERY GENERATION: LLM] Query {idx}: {q}")

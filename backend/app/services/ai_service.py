@@ -320,16 +320,17 @@ Message:
             if not text:
                 return []
 
+            # Strip reasoning/think tags FIRST
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
             text = text.replace("```json", "").replace("```", "")
 
             candidates: List[str] = []
             seen = set()
 
-            # Prefer quoted strings first.
+            # Strategy 1: Look for quoted strings in the response
             for quoted in re.findall(r'"([^"\n]{12,260})"', text):
                 cleaned = _normalize_candidate(quoted)
-                if len(cleaned.split()) < 5:
+                if len(cleaned.split()) < 4:  # Reduced from 5 to 4
                     continue
                 lowered = cleaned.lower()
                 if any(token in lowered for token in ["strategy", "json", "schema", "rules"]):
@@ -341,41 +342,28 @@ Message:
                 if len(candidates) >= max_items:
                     return candidates
 
-            bad_fragments = {
-                "another one",
-                "next",
-                "lastly",
-                "starting with",
-                "that works",
-                "good",
-                "perfect",
-                "check",
-                "maybe",
-                "should",
-                "example",
-                "words",
-                "yes",
-                "nice",
-                "with size",             # Structural keyword - not part of actual query
-                "all industries",        # Structural - indicates filter issue
-                "all sizes",             # Structural - indicates filter issue
-                "size all",              # Malformed filter
-                "in all",                # Malformed prefix
-            }
-
+            # Strategy 2: Look for numbered lists or bullets
             for line in text.splitlines():
-                cleaned = _normalize_candidate(line)
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Remove list markers
+                cleaned = re.sub(r"^[\d\.\)\-\*\s]+", "", line).strip()
+                cleaned = _normalize_candidate(cleaned)
+                
                 if not cleaned:
                     continue
                 if ":" in cleaned:
-                    cleaned = _normalize_candidate(cleaned.split(":", 1)[1])
-                if len(cleaned.split()) < 5:
+                    parts = cleaned.split(":", 1)
+                    if len(parts) > 1:
+                        cleaned = _normalize_candidate(parts[1].strip())
+                
+                if len(cleaned.split()) < 4:
                     continue
 
                 lowered = cleaned.lower()
-                if any(token in lowered for token in ["strategy", "query", "json", "schema", "rules"]):
-                    continue
-                if any(fragment in lowered for fragment in bad_fragments):
+                if any(token in lowered for token in ["strategy", "query", "json", "schema", "rules", "note", "important"]):
                     continue
                 if lowered in seen:
                     continue
@@ -458,41 +446,42 @@ Message:
             return accepted
 
         system_prompt = (
-            "You are a principal B2B demand generation strategist. "
-            "Generate high-intent, service-specific Google queries for discovering active buyers. "
-            "CRITICAL: Use real-time business context, not static templates. Queries must WORK on Google. "
-            "Output valid JSON ONLY. "
-            "One service focus per query."
+            "You are a B2B lead generation specialist. Generate Google search queries ONLY. "
+            "Output valid JSON immediately. Do NOT use thinking tags, reasoning, or explanations. "
+            "Every response MUST be valid JSON starting with { and ending with }."
         )
 
+        # Build company context for LLM
+        company_narrative = profile_brief.get("company_narrative", "")
+        target_industries_str = ", ".join(profile_brief.get("target_industries", []) or []) or "various industries"
+        target_locations_str = ", ".join(profile_brief.get("target_locations", []) or []) or location_hint or "various locations"
+        services_str = ", ".join(profile_brief.get("services", []) or [])
+        technologies_str = ", ".join(profile_brief.get("technologies", []) or [])
+        expertise_str = ", ".join(profile_brief.get("expertise_areas", []) or [])
+
+        # Build rich context for LLM
+        context_summary = f"""
+COMPANY_PROFILE:
+- Offers: {services_str or 'various services'}
+- Expertise: {expertise_str or 'N/A'}
+- Technologies: {technologies_str or 'N/A'}
+- Target Industries: {target_industries_str}
+- Service Regions: {target_locations_str}
+- Focus: {company_narrative[:300] if company_narrative else 'Custom development and consulting'}
+
+RETRIEVED_COMPANY_CONTEXT:
+{chr(10).join(top_context) if top_context else 'Standard market context'}
+"""
+
         user_prompt = (
-            f"Generate {limit} high-intent Google queries for B2B lead discovery.\n"
-            "Output ONLY valid JSON—no thinking tags, no markdown.\n\n"
-            f"CURRENT_DATE: {current_date}\n"
-            f"REQUEST: {user_query}\n"
-            f"LOCATION: {location_hint or active_filters.get('location') or ''}\n"
-            f"INDUSTRY: {active_filters.get('industry') or ''}\n"
-            f"PRIMARY_SERVICE: {(profile_brief.get('services') or [''])[0]}\n"
-            f"SERVICE_PORTFOLIO: {json.dumps((profile_brief.get('services') or [])[:8], ensure_ascii=True)}\n"
-            f"CONTEXT: {json.dumps(top_context, ensure_ascii=True)}\n\n"
-            "Rules:\n"
-            "- CRITICAL: Queries MUST be realistic and return results. Not too many exact quotes.\n"
-            "- 8-13 words per query (achievable on Google).\n"
-            "- Include target city/region in EVERY query (geo-fenced).\n"
-            "- Diversify query situations across the set: hiring, migration, modernization, procurement, funding, expansion.\n"
-            "- Each query should represent a different buying situation; avoid same sentence template structure.\n"
-            "- Every query must include at least one live-time cue: now, this year, 2026, recently funded, actively hiring, or open RFP.\n"
-            "- Never output meta text such as 'original queries mention...', 'things like...', or explanatory prose.\n"
-            "- Mix quote usage: Use quotes ONLY for critical keywords, NOT for every phrase.\n"
-            "- Use OR operators to expand: 'hiring' OR 'recruiting', 'expansion' OR 'growth'.\n"
-            "- Include 1-2 strong buying signals: hiring, funding, expansion, RFP, implementation, modernization.\n"
-            "- Example GOOD: 'web development hiring gurgaon company'\n"
-            "- Example BAD: '\"web development\" \"hiring engineers\" \"technical stack\" \"gurgaon\"' (too many quotes).\n"
-            "- Allowed minimal operators: site:linkedin.com OR OR - (dash for exclude).\n"
-            "- ONE service per query—never mix services in same query.\n"
-            "- Avoid generic: 'best', 'top 10', 'list of'.\n\n"
-            "Return JSON ONLY:\n"
-            "{\"strategy\":\"SHORT_DESCRIPTION\",\"queries\":[\"query_text_1\",\"query_text_2\",...]}"
+            f"Generate {limit} Google search queries to find companies in {target_locations_str} "
+            f"needing {services_str or 'these services'}.\n\n"
+            f"Target Industries: {target_industries_str}\n"
+            f"Location: {location_hint or target_locations_str}\n"
+            f"Services: {services_str}\n\n"
+            "Rules: 8-13 words per query, include location, mix buying signals (hiring/funded/expanding/modernizing), no quotes, minimal operators.\n\n"
+            "Return ONLY JSON:\n"
+            "{\"queries\":[\"query_1\",\"query_2\",\"query_3\",\"query_4\",\"query_5\",\"query_6\",\"query_7\",\"query_8\"]}"
         )
 
         try:
@@ -502,15 +491,25 @@ Message:
                 f"filters_keys={list(active_filters.keys())} "
                 f"context_chunks={len(top_context)}"
             )
+            print(
+                "[LEAD QUERY PLANNER CONTEXT] "
+                f"target_industries={','.join(profile_brief.get('target_industries', [])[:2])} "
+                f"services={','.join(profile_brief.get('services', [])[:2])} "
+                f"location={location_hint or 'not_specified'}"
+            )
             raw_response = await groq_provider.call_chat_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                temperature=0.18,
-                max_tokens=520,
-                require_json=False,
+                temperature=0.0,  # Reduced from 0.18 to 0 for deterministic output
+                max_tokens=320,   # Reduced from 520
+                require_json=True,  # Explicitly require JSON
             )
 
-            parsed = extract_json_object(raw_response)
+            # Strip reasoning traces FIRST before JSON parsing
+            cleaned_response = re.sub(r"<think>.*?</think>", "", raw_response, flags=re.DOTALL | re.IGNORECASE)
+            cleaned_response = cleaned_response.replace("```json", "").replace("```", "").strip()
+            
+            parsed = extract_json_object(cleaned_response)
             raw_queries = []
             if isinstance(parsed, dict):
                 raw_queries = (
@@ -641,9 +640,9 @@ Message:
                 refined_raw = await groq_provider.call_chat_completion(
                     system_prompt=system_prompt,
                     user_prompt=refinement_prompt,
-                    temperature=0.12,
-                    max_tokens=420,
-                    require_json=False,
+                    temperature=0.0,  # Reduced from 0.12
+                    max_tokens=320,   # Reduced from 420
+                    require_json=True,  # Require JSON output
                 )
                 refined_parsed = extract_json_object(refined_raw) or {}
                 refined_candidates = []

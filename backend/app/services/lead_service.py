@@ -1496,15 +1496,15 @@ class LeadService:
             min_signal = 0.16
             min_tech = 0.14
         else:
-            min_quality = 0.48
-            min_signal = 0.20
-            min_tech = 0.18
+            min_quality = 0.40
+            min_signal = 0.15
+            min_tech = 0.12
 
         if quality_score < min_quality:
             return False
 
         # Keep parity with discovery gate: a lead can qualify via either
-        # intent signal or technical relevance.
+        # intent signal or technical relevance (OR logic, not AND).
         if signal_confidence < min_signal and tech_relevance < min_tech:
             return False
 
@@ -1618,23 +1618,24 @@ class LeadService:
                 else:
                     weighted_match += 0.55
 
-            min_weighted_match = 2.2
+            min_weighted_match = 1.5
             if services:
-                min_weighted_match += 0.6
+                min_weighted_match += 0.4
             if location:
-                min_weighted_match += 0.6
+                min_weighted_match += 0.3
 
             if weighted_match < min_weighted_match:
                 return False
-            if strong_hits == 0 and weighted_match < (min_weighted_match + 0.8):
+            if strong_hits == 0 and weighted_match < (min_weighted_match + 0.3):
                 return False
-            # For rich multi-token queries, require at least two strong semantic hits.
-            if len(candidate_tokens) >= 5 and strong_hits < 2:
+            # For rich multi-token queries, require at least one strong semantic hit (relaxed from 2).
+            if len(candidate_tokens) >= 5 and strong_hits < 1:
                 return False
-            # If query clearly implies service context, require stronger service/intent grounding.
-            if service_tokens and (service_hits + intent_hits) < 2:
+            # If query clearly implies service context, require at least one service/intent hit (relaxed from 2).
+            if service_tokens and (service_hits + intent_hits) < 1:
                 return False
-            if location and location_tokens and location_hits == 0:
+            # Location preference (soft gate, not hard requirement)
+            if location and location_tokens and location_hits == 0 and strong_hits == 0:
                 return False
 
         return True
