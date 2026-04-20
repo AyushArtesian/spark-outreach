@@ -1,8 +1,58 @@
 ﻿# Spark Outreach
 
-Spark Outreach is a full-stack buyer-intent lead discovery and outreach platform. It combines company-context intelligence, multi-source lead discovery, lead scoring, enrichment, and AI-assisted messaging in a single workflow.
+<div align="center">
 
-This document is a full implementation report for the current codebase, written as professional product and engineering documentation.
+[![Frontend React 18](https://img.shields.io/badge/Frontend-React%2018-61DAFB?style=flat-square&logo=react)](https://react.dev/)
+[![Backend FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Database MongoDB](https://img.shields.io/badge/Database-MongoDB-47A248?style=flat-square&logo=mongodb)](https://www.mongodb.com/)
+[![Language TypeScript](https://img.shields.io/badge/Language-TypeScript-3178C6?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
+[![Build Vite](https://img.shields.io/badge/Build-Vite-646CFF?style=flat-square&logo=vite)](https://vitejs.dev/)
+[![Status Active Development](https://img.shields.io/badge/Status-Active%20Development-brightgreen?style=flat-square)]()
+
+**AI-assisted buyer-intent lead discovery, qualification, enrichment, and outreach platform**
+
+***Define your service profile, discover real buying signals, score fit, enrich lead intelligence, and generate personalized outbound in one system.***
+
+</div>
+
+---
+
+Spark Outreach is a full-stack lead generation and outreach system for service businesses. It combines company-context intelligence, multi-source discovery, scoring, enrichment, and AI workflows into a single operator experience.
+
+This README is a source-verified, implementation-level technical report for product, engineering, and delivery teams.
+
+## Core Functionality
+
+| Area | Capability |
+| --- | --- |
+| Company Intelligence | Multi-step company setup with services, ICP context, profile embeddings, and generated buyer signals |
+| Lead Discovery | Multi-source lead discovery using Apollo (optional), web discovery, and intent signal monitoring |
+| Lead Qualification | Scorecards with fit, intent, and signal dimensions; hot-lead extraction |
+| Lead Operations | Full lead lifecycle: create, bulk create, update, contact, delete, campaign filtering |
+| Outreach | AI-generated cold email and message workflows with lead-level history |
+| Monitoring | Async intent scan start, status polling, and detected signal retrieval |
+| AI Platform | RAG retrieval, campaign embedding generation, and message generation endpoints |
+
+## Key Highlights
+
+- Full-stack implementation: React + TypeScript + FastAPI + MongoDB.
+- Authenticated multi-user workflow with JWT-protected APIs.
+- End-to-end lead workflow from profile setup to outreach execution.
+- Multi-provider lead and signal ingestion with ranking and filtering.
+- Clear service-oriented backend architecture with modular routers and services.
+- Ready for iterative production hardening (env-driven config, health checks, test stack).
+
+## Complete Workflow (High Level)
+
+```text
+1) Authenticate User
+  -> 2) Complete Company Setup
+  -> 3) Generate Embeddings + ICP Signals
+  -> 4) Run Lead Discovery and Intent Scan
+  -> 5) Score, Filter, and Review Leads
+  -> 6) Enrich Lead Intelligence
+  -> 7) Generate Outreach and Track Contact
+```
 
 ## Table of Contents
 
@@ -175,18 +225,35 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-  Root[/] --> Landing[Index]
-  Root --> Login[/login]
-  Root --> Register[/register]
+  Root["App Router"]
+  Landing["/ -> Index"]
+  Login["/login -> Login"]
+  Register["/register -> Register"]
+  Protected["ProtectedRoute + DashboardLayout"]
+  Dashboard["/dashboard -> LeadDashboard"]
+  Setup["/company-setup -> CompanySetup"]
+  Search["/search -> LeadSearch"]
+  Leads["/leads -> LeadResults"]
+  AllLeads["/all-leads -> AllLeads"]
+  LeadDetail["/lead/:id -> LeadDetail"]
+  Settings["/settings -> Settings"]
+  Test["/test -> TestDashboard"]
+  NotFound["* -> NotFound"]
 
-  AuthGate[ProtectedRoute] --> Dashboard[/dashboard]
-  AuthGate --> Setup[/company-setup]
-  AuthGate --> Search[/search]
-  AuthGate --> Leads[/leads]
-  AuthGate --> AllLeads[/all-leads]
-  AuthGate --> LeadDetail[/lead/:id]
-  AuthGate --> Settings[/settings]
-  AuthGate --> Test[/test]
+  Root --> Landing
+  Root --> Login
+  Root --> Register
+  Root --> Protected
+  Root --> NotFound
+
+  Protected --> Dashboard
+  Protected --> Setup
+  Protected --> Search
+  Protected --> Leads
+  Protected --> AllLeads
+  Protected --> LeadDetail
+  Protected --> Settings
+  Protected --> Test
 ```
 
 ## 4) Core Workflows
