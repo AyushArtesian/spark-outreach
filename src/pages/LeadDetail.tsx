@@ -77,9 +77,11 @@ interface LeadDetail {
   raw_data?: {
     company_summary?: string;
     snippet?: string;
+    company_website?: string;
     source_url?: string;
     location?: string;
     detected_location?: string;
+    decision_maker?: Record<string, any>;
     discovery_signals?: string[];
     final_reason?: string[];
   };
@@ -229,7 +231,14 @@ export default function LeadDetail() {
   const companyName = lead.company || "Unknown Company";
   const location = lead.raw_data?.detected_location || lead.raw_data?.location || "Unknown location";
   const industry = lead.industry || "Unknown industry";
-  const website = lead.raw_data?.source_url || "";
+  const website = lead.raw_data?.source_url || lead.raw_data?.company_website || "";
+  const decisionMakerEmail = String(
+    lead.raw_data?.decision_maker?.email ||
+      lead.enrichment?.decision_maker?.email ||
+      ""
+  ).trim();
+  const hasPlaceholderEmail = Boolean(lead.email && lead.email.endsWith(".intent.local"));
+  const contactEmail = (!hasPlaceholderEmail && lead.email ? lead.email : decisionMakerEmail || lead.email || "").trim();
   const summary = lead.raw_data?.company_summary || lead.raw_data?.snippet || lead.job_title || "No summary available.";
   const signals = lead.signal_keywords?.length ? lead.signal_keywords : lead.raw_data?.discovery_signals || [];
   const reasonList = lead.reason?.length ? lead.reason : lead.raw_data?.final_reason || ["Qualified by scoring and signal analysis."];
@@ -260,6 +269,7 @@ export default function LeadDetail() {
                 <div className="flex flex-wrap gap-4 mt-3 text-sm text-muted-foreground">
                   <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> {location}</span>
                   <span className="flex items-center gap-1"><Building2 className="w-3.5 h-3.5" /> {industry}</span>
+                  {contactEmail && <span className="flex items-center gap-1"><Mail className="w-3.5 h-3.5" /> {contactEmail}</span>}
                   {lead.job_title && <span className="flex items-center gap-1"><Users className="w-3.5 h-3.5" /> {lead.job_title}</span>}
                   {website && <span className="flex items-center gap-1"><Globe className="w-3.5 h-3.5" /> {website}</span>}
                   {lead.created_at && <span>{new Date(lead.created_at).toLocaleDateString()}</span>}
@@ -273,9 +283,11 @@ export default function LeadDetail() {
                     size="sm"
                     className="gap-1"
                     onClick={() => {
-                      if (lead.email) {
-                        navigator.clipboard.writeText(lead.email);
+                      if (contactEmail) {
+                        navigator.clipboard.writeText(contactEmail);
                         toast({ title: "Email copied" });
+                      } else {
+                        toast({ title: "No contact email found" });
                       }
                     }}
                   >
@@ -433,7 +445,18 @@ export default function LeadDetail() {
                 <CardTitle className="text-base font-display">Quick Actions</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2">
-                <Button className="w-full gap-2 justify-start" variant="default" onClick={() => navigator.clipboard.writeText(lead.email)}>
+                <Button
+                  className="w-full gap-2 justify-start"
+                  variant="default"
+                  onClick={() => {
+                    if (contactEmail) {
+                      navigator.clipboard.writeText(contactEmail);
+                      toast({ title: "Email copied" });
+                    } else {
+                      toast({ title: "No contact email found" });
+                    }
+                  }}
+                >
                   <Mail className="w-4 h-4" /> Send Email
                 </Button>
                 <Button className="w-full gap-2 justify-start" variant="outline" onClick={() => website && window.open(website, "_blank")}>

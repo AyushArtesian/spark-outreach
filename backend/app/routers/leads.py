@@ -4,6 +4,8 @@ Leads router
 from fastapi import APIRouter, HTTPException, status, Header, BackgroundTasks, Body
 from typing import List, Optional, Dict, Any
 import logging
+import re
+from urllib.parse import urlparse
 
 from app.models.lead import Lead
 from app.models.user import User
@@ -238,6 +240,18 @@ async def run_intent_scan(
     campaign_ids = None
     if scan_request and scan_request.campaign_ids:
         campaign_ids = scan_request.campaign_ids
+
+    # Optional per-run overrides from request payload.
+    requested_services = [
+        str(item).strip()
+        for item in ((scan_request.services if scan_request else None) or [])
+        if str(item).strip()
+    ]
+    requested_locations = [
+        str(item).strip()
+        for item in ((scan_request.locations if scan_request else None) or [])
+        if str(item).strip()
+    ]
     
     # If no campaign_ids provided, get all active campaigns for the user
     if not campaign_ids:
@@ -250,14 +264,25 @@ async def run_intent_scan(
             detail="No active campaigns found. Please create and activate a campaign first."
         )
     
-    logger.info(f"[SCAN] Starting scan for user {current_user.id} with campaigns: {campaign_ids}")
+    logger.info(
+        f"[SCAN] Starting scan for user {current_user.id} with campaigns: {campaign_ids} "
+        f"services={requested_services or 'campaign/default'} "
+        f"locations={requested_locations or 'campaign/default'}"
+    )
     
     scan_id, already_running = await intent_monitor_service.start_scan(
         str(current_user.id), 
         campaign_ids=campaign_ids
     )
     if not already_running:
-        background_tasks.add_task(intent_monitor_service.execute_scan, str(current_user.id), scan_id)
+        background_tasks.add_task(
+            intent_monitor_service.execute_scan,
+            str(current_user.id),
+            scan_id,
+            campaign_ids,
+            requested_services,
+            requested_locations,
+        )
 
     return IntentScanStartResponse(
         scan_id=scan_id,
@@ -315,10 +340,43 @@ async def get_intent_signals(
     try:
         campaign_oid = ObjectId(campaign_id)
         signals = IntentSignal.objects(campaign_id=campaign_oid).limit(limit).order_by('-detected_at')
+
+        # Build lookup for leads created under this campaign so UI can open them directly.
+        campaign_leads = Lead.objects(campaign_id=str(campaign_id)).only('id', 'name', 'company', 'raw_data')
+
+        def _normalize_company_key(value: str) -> str:
+            return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())).strip()
+
+        def _extract_domain(url_or_host: str) -> str:
+            raw = str(url_or_host or "").strip().lower()
+            if not raw:
+                return ""
+            if raw.startswith(("http://", "https://")):
+                host = (urlparse(raw).netloc or "").lower()
+            else:
+                host = raw.split("/", 1)[0].lower()
+            return host.replace("www.", "")
+
+        lead_id_by_company: Dict[str, str] = {}
+        lead_id_by_domain: Dict[str, str] = {}
+        for lead in campaign_leads:
+            candidate_name = str(getattr(lead, 'company', '') or getattr(lead, 'name', '')).strip()
+            key = _normalize_company_key(candidate_name)
+            if key and key not in lead_id_by_company:
+                lead_id_by_company[key] = str(lead.id)
+
+            lead_raw = lead.raw_data if isinstance(lead.raw_data, dict) else {}
+            lead_site = str(lead_raw.get('company_website') or lead_raw.get('source_url') or '').strip()
+            lead_domain = _extract_domain(lead_site)
+            if lead_domain and lead_domain not in lead_id_by_domain:
+                lead_id_by_domain[lead_domain] = str(lead.id)
         
         # Serialize signals
         result = []
         for signal in signals:
+            signal_company_key = _normalize_company_key(signal.company_id)
+            signal_domain = _extract_domain(signal.company_url)
+            matched_lead_id = lead_id_by_company.get(signal_company_key) or lead_id_by_domain.get(signal_domain)
             signal_dict = {
                 'id': str(signal.id),
                 'signal_type': signal.signal_type,
@@ -326,6 +384,8 @@ async def get_intent_signals(
                 'company_id': signal.company_id,
                 'company_url': signal.company_url,
                 'source': signal.source,
+                'lead_id': matched_lead_id,
+                'is_openable': bool(matched_lead_id),
                 'detected_at': signal.detected_at.isoformat() if signal.detected_at else None,
             }
             

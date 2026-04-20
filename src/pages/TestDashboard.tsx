@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +15,19 @@ interface Lead {
   id: string;
   name: string;
   email: string;
+  company?: string;
   source?: string;
+}
+
+interface IntentSignalItem {
+  id: string;
+  company_id: string;
+  company_url?: string;
+  signal_type: string;
+  source: string;
+  strength: number;
+  lead_id?: string | null;
+  is_openable?: boolean;
 }
 
 interface ScanResult {
@@ -77,7 +90,7 @@ export default function TestDashboard() {
   const [locations, setLocations] = useState<string[]>(['India']);
   const [newService, setNewService] = useState('');
   const [newLocation, setNewLocation] = useState('');
-  const [signals, setSignals] = useState<any[]>([]);
+  const [signals, setSignals] = useState<IntentSignalItem[]>([]);
   
   // Phase 5 States
   const [connectionResult, setConnectionResult] = useState<ConnectionResult | null>(null);
@@ -240,6 +253,7 @@ export default function TestDashboard() {
         const data = await response.json();
         console.log(`Loaded ${Array.isArray(data) ? data.length : '?'} signals:`, data);
         setSignals(Array.isArray(data) ? data : []);
+        await loadLeads();
       } else {
         // Endpoint not implemented yet
         console.log('Intent signals endpoint not implemented yet');
@@ -532,6 +546,15 @@ export default function TestDashboard() {
                           <div className="flex-1">
                             <p className="font-semibold text-slate-900">🎯 {signal.company_id}</p>
                             <p className="text-sm text-slate-600">Signal: {signal.signal_type} ({signal.source})</p>
+                            {signal.lead_id ? (
+                              <div className="mt-2">
+                                <Link to={`/lead/${signal.lead_id}`}>
+                                  <Button size="sm" variant="outline">Open Lead</Button>
+                                </Link>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-slate-500 mt-2">Lead not created yet for this signal.</p>
+                            )}
                           </div>
                           <div className="text-right">
                             <p className="text-lg font-bold text-green-600">{(signal.strength * 100).toFixed(0)}%</p>

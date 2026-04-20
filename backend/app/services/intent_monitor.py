@@ -5,8 +5,10 @@ Orchestrates job board scanning, signal detection, and lead auto-creation
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from bson import ObjectId
 
@@ -35,6 +37,107 @@ class IntentMonitorService:
     def __init__(self):
         self._active_scans: Dict[str, str] = {}  # user_id -> scan_id
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _normalize_signal_type(buyer_result: Dict) -> str:
+        """Map discovered signal text to IntentSignal enum values."""
+        raw_signal_type = str(buyer_result.get('signal_type', '')).strip().lower()
+        raw_buyer_signal = str(buyer_result.get('buyer_signal', '')).strip().lower()
+        combined = f"{raw_signal_type} {raw_buyer_signal}"
+
+        if 'rfp' in combined or 'request for proposal' in combined:
+            return 'rfp_posted'
+        if 'digital_transformation' in combined or 'digital transformation' in combined or 'modernization' in combined:
+            return 'digital_transformation'
+        if 'funding' in combined or 'funded' in combined or 'series a' in combined or 'series b' in combined:
+            return 'funding'
+        if 'expansion' in combined or 'scaling' in combined or 'growth' in combined:
+            return 'expansion'
+        if 'seeking_partner' in combined or 'partner' in combined or 'vendor' in combined or 'implementation' in combined:
+            return 'seeking_partner'
+        return 'hiring_technical'
+
+    @staticmethod
+    def _normalize_signal_source(buyer_result: Dict) -> str:
+        """Map source aliases to IntentSignal source enum values."""
+        raw_source = str(buyer_result.get('source', '')).strip().lower()
+        source_map = {
+            'linked_jobs': 'linkedin_jobs',
+            'linkedin': 'linkedin_jobs',
+            'linkedin_jobs': 'linkedin_jobs',
+            'indeed': 'indeed',
+            'angellist': 'angellist',
+            'crunchbase': 'crunchbase',
+            'web': 'web',
+        }
+        return source_map.get(raw_source, 'web')
+
+    @staticmethod
+    def _build_placeholder_email(company_name: str) -> str:
+        """Generate stable placeholder email for company-only leads."""
+        slug = re.sub(r"[^a-z0-9]+", ".", str(company_name or "").strip().lower()).strip(".")
+        if not slug:
+            slug = "lead"
+        return f"contact@{slug}.intent.local"
+
+    @staticmethod
+    def _normalize_company_key(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())
+        normalized = re.sub(
+            r"\b(inc|llc|ltd|limited|pvt|private|technologies|technology|solutions|systems|services|corp|co|company)\b",
+            " ",
+            normalized,
+        )
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @staticmethod
+    def _is_generic_company_name(value: str) -> bool:
+        text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+        if not text:
+            return True
+        generic_tokens = (
+            "rfp",
+            "request for proposal",
+            "tender",
+            "job",
+            "hiring",
+            "vendor",
+            "partner",
+            "consulting",
+            "opportunity",
+            "latest",
+            "top ",
+            "best ",
+        )
+        if any(token in text for token in generic_tokens):
+            return True
+        return len(text.split()) >= 6
+
+    @staticmethod
+    def _extract_domain(url_or_host: str) -> str:
+        raw = str(url_or_host or "").strip().lower()
+        if not raw:
+            return ""
+        if raw.startswith(("http://", "https://")):
+            host = (urlparse(raw).netloc or "").lower()
+        else:
+            host = raw.split("/", 1)[0].lower()
+        return host.replace("www.", "")
+
+    @staticmethod
+    def _is_valid_email(value: str) -> bool:
+        email = str(value or "").strip().lower()
+        if not email or "@" not in email:
+            return False
+        local, _, domain = email.partition("@")
+        return bool(local and domain and "." in domain)
+
+    def _build_contact_email(self, company_name: str, company_website: str) -> str:
+        """Build best-effort contact email using website domain when available."""
+        domain = self._extract_domain(company_website)
+        if domain and "." in domain:
+            return f"info@{domain}"
+        return self._build_placeholder_email(company_name)
 
     async def start_scan(
         self,
@@ -117,6 +220,8 @@ class IntentMonitorService:
         owner_id: str,
         scan_id: str,
         campaign_ids: Optional[List[str]] = None,
+        services_override: Optional[List[str]] = None,
+        locations_override: Optional[List[str]] = None,
     ) -> Dict:
         """
         Execute complete scan workflow:
@@ -150,7 +255,9 @@ class IntentMonitorService:
                     owner_id=uid,
                     campaign_id=campaign_id,
                     scan_id=scan_id,
-                    progress=(i, len(campaign_ids))
+                    progress=(i, len(campaign_ids)),
+                    services_override=services_override,
+                    locations_override=locations_override,
                 )
             
             # Mark complete
@@ -199,6 +306,8 @@ class IntentMonitorService:
         campaign_id: str,
         scan_id: str,
         progress: Tuple[int, int],
+        services_override: Optional[List[str]] = None,
+        locations_override: Optional[List[str]] = None,
     ):
         """Scan single campaign for intent signals"""
         try:
@@ -210,13 +319,18 @@ class IntentMonitorService:
             # Get scan record to update
             scan = IntentScan.objects(scan_id=scan_id).first()
             
-            # Use campaign search queries or default ones
-            services = getattr(campaign, 'services', []) or ['Software Development', 'Web Development']
-            locations = getattr(campaign, 'target_locations', []) or ['India']
+            # Prefer per-run overrides, then campaign configuration, then safe defaults.
+            services = [str(item).strip() for item in (services_override or []) if str(item).strip()]
+            locations = [str(item).strip() for item in (locations_override or []) if str(item).strip()]
+
+            if not services:
+                services = getattr(campaign, 'services', []) or ['Software Development', 'Web Development']
+            if not locations:
+                locations = getattr(campaign, 'target_locations', []) or ['India']
             
             logger.info(f"[SCAN] Starting buyer intent scan {campaign_id}")
             logger.info(f"[SCAN] Campaign: {campaign.title}")
-            logger.info(f"[SCAN] Looking for companies seeking: {getattr(campaign, 'services', [])}")
+            logger.info(f"[SCAN] Looking for companies seeking: {services}")
             logger.info(f"[SCAN] Services being searched: {services}")
             logger.info(f"[SCAN] Target locations: {locations}")
             
@@ -254,12 +368,15 @@ class IntentMonitorService:
                     company_name = buyer_result.get('company_name', '').strip()
                     if not company_name:
                         continue
+
+                    company_website = str(buyer_result.get('company_website') or '').strip()
+                    company_domain = self._extract_domain(company_website)
                     
                     # Calculate buyer intent score based on signals
                     signal_strength = self._calculate_intent_score(buyer_result)
                     
                     # Store highest-scoring posting per company
-                    company_key = company_name.lower()
+                    company_key = company_domain or company_name.lower()
                     if company_key not in all_companies or signal_strength > all_companies[company_key]['strength']:
                         all_companies[company_key] = {
                             'name': company_name,
@@ -270,14 +387,16 @@ class IntentMonitorService:
                     # Create signal record
                     if signal_strength > 0:
                         from app.models.intent import IntentSignalDetail
+                        signal_type = self._normalize_signal_type(buyer_result)
+                        signal_source = self._normalize_signal_source(buyer_result)
                         
                         signal = IntentSignal(
                             campaign_id=ObjectId(campaign_id),
                             company_id=company_name,
                             company_url=buyer_result.get('company_website'),
-                            signal_type='hiring',
+                            signal_type=signal_type,
                             strength=signal_strength,
-                            source=buyer_result.get('source', 'linked_jobs'),
+                            source=signal_source,
                             details=IntentSignalDetail(
                                 posting_url=buyer_result.get('job_url'),
                                 posting_title=buyer_result.get('job_title'),
@@ -312,44 +431,168 @@ class IntentMonitorService:
                 enabled=True
             ).first()
             
-            intent_threshold = schedule.intent_threshold if schedule else 0.60
+            # Use a practical default threshold so medium-confidence buyer signals
+            # are still captured as leads when no custom schedule is configured.
+            intent_threshold = schedule.intent_threshold if schedule else 0.50
+
+            campaign_leads = list(
+                Lead.objects(campaign_id=str(campaign_id)).only('id', 'company', 'name', 'email', 'raw_data')
+            )
+            lead_by_company: Dict[str, Lead] = {}
+            lead_by_domain: Dict[str, Lead] = {}
+            for lead in campaign_leads:
+                candidate_name = str(getattr(lead, 'company', '') or getattr(lead, 'name', '')).strip()
+                key = self._normalize_company_key(candidate_name)
+                if key and key not in lead_by_company:
+                    lead_by_company[key] = lead
+
+                lead_raw = lead.raw_data if isinstance(lead.raw_data, dict) else {}
+                lead_site = str(lead_raw.get('company_website') or lead_raw.get('source_url') or '').strip()
+                lead_domain = self._extract_domain(lead_site)
+                if lead_domain and lead_domain not in lead_by_domain:
+                    lead_by_domain[lead_domain] = lead
             
             for company_key, company_data in all_companies.items():
                 try:
                     company_name = company_data['name']
                     signal_strength = company_data['strength']
                     job_info = company_data['info']
+                    company_website = str(job_info.get('company_website') or '').strip()
+                    source_url = str(
+                        job_info.get('job_url')
+                        or job_info.get('source_url')
+                        or company_website
+                        or ''
+                    ).strip()
                     
                     if signal_strength >= intent_threshold:
-                        # Check if lead already exists
-                        existing = Lead.objects(
-                            company_name=company_name,
-                            campaign_id=ObjectId(campaign_id)
-                        ).first()
+                        # Check if lead already exists by normalized company or known domain.
+                        normalized_company = self._normalize_company_key(company_name)
+                        company_domain = self._extract_domain(company_website)
+                        source_domain = self._extract_domain(source_url)
+                        existing = lead_by_company.get(normalized_company)
+                        if not existing and company_domain:
+                            existing = lead_by_domain.get(company_domain)
+                        if not existing and source_domain:
+                            existing = lead_by_domain.get(source_domain)
                         
                         if not existing:
+                            enrichment_payload: Dict[str, Dict] = {}
+                            if company_website:
+                                try:
+                                    from app.services.enrichment_service import enrichment_service
+
+                                    enrichment_payload = await enrichment_service.enrich_lead(
+                                        {
+                                            'company_name': company_name,
+                                            'company_website': company_website,
+                                            'source_url': source_url,
+                                            'snippet': job_info.get('details') or job_info.get('buyer_signal') or '',
+                                            'source': job_info.get('source') or 'web',
+                                        }
+                                    )
+                                except Exception as enrich_err:
+                                    logger.warning(f"[SCAN] Enrichment failed for {company_name}: {enrich_err}")
+
+                            decision_maker = enrichment_payload.get('decision_maker', {}) if isinstance(enrichment_payload, dict) else {}
+                            tech_stack = enrichment_payload.get('tech_stack', {}) if isinstance(enrichment_payload, dict) else {}
+                            company_signals = enrichment_payload.get('company_signals', {}) if isinstance(enrichment_payload, dict) else {}
+
+                            candidate_email = str(decision_maker.get('email') or '').strip()
+                            lead_email = (
+                                candidate_email
+                                if self._is_valid_email(candidate_email)
+                                else self._build_contact_email(company_name, company_website)
+                            )
+                            lead_signal_type = self._normalize_signal_type(job_info)
+
                             # Auto-create lead
                             lead = Lead(
-                                campaign_id=ObjectId(campaign_id),
-                                company_name=company_name,
-                                company_url=job_info.get('company_website'),
-                                source='intent_monitoring',
-                                quality_score=signal_strength,
+                                campaign_id=str(campaign_id),
+                                name=company_name,
+                                email=lead_email,
+                                company=company_name,
+                                job_title=job_info.get('job_title') or 'Buyer Intent Signal',
+                                industry=str(job_info.get('service') or '').strip() or None,
                                 status='discovered',
+                                signal_score=signal_strength,
+                                signal_keywords=['buyer_intent', lead_signal_type],
+                                enriched_data={
+                                    'tech_stack': tech_stack,
+                                    'decision_maker': decision_maker,
+                                    'company_signals': company_signals,
+                                    'enriched_at': enrichment_payload.get('enriched_at') if isinstance(enrichment_payload, dict) else None,
+                                },
                                 raw_data={
+                                    'source': 'intent_monitoring',
+                                    'company_website': company_website,
+                                    'source_url': source_url,
+                                    'company_summary': str(job_info.get('details') or job_info.get('buyer_signal') or '').strip(),
                                     'job_title': job_info.get('job_title'),
                                     'posted_date': job_info.get('posted_date'),
                                     'location': job_info.get('location'),
                                     'intent_signal_source': job_info.get('source'),
+                                    'buyer_signal': job_info.get('buyer_signal'),
+                                    'signal_type': job_info.get('signal_type'),
+                                    'intent_strength': signal_strength,
+                                    'decision_maker': decision_maker,
+                                    'tech_stack': tech_stack,
+                                    'company_signals': company_signals,
                                 }
                             )
                             lead.save()
+
+                            if normalized_company:
+                                lead_by_company[normalized_company] = lead
+                            if company_domain:
+                                lead_by_domain[company_domain] = lead
+                            if source_domain:
+                                lead_by_domain[source_domain] = lead
                             
                             if scan:
                                 scan.results.leads_created += 1
                             
                             logger.info(f"[SCAN] Auto-created lead: {company_name} (strength: {signal_strength:.2f})")
                         else:
+                            # Backfill key fields on existing leads discovered with older/noisy data.
+                            company_website = str(job_info.get('company_website') or '').strip()
+                            source_url = str(
+                                job_info.get('job_url')
+                                or job_info.get('source_url')
+                                or company_website
+                                or ''
+                            ).strip()
+                            existing.raw_data = existing.raw_data or {}
+                            updated = False
+
+                            if company_website and not str(existing.raw_data.get('company_website') or '').strip():
+                                existing.raw_data['company_website'] = company_website
+                                updated = True
+                            if source_url and not str(existing.raw_data.get('source_url') or '').strip():
+                                existing.raw_data['source_url'] = source_url
+                                updated = True
+                            if self._is_generic_company_name(existing.company or existing.name) and not self._is_generic_company_name(company_name):
+                                existing.company = company_name
+                                existing.name = company_name
+                                updated = True
+
+                            existing_email = str(existing.email or '').strip()
+                            if not self._is_valid_email(existing_email) or existing_email.endswith('.intent.local'):
+                                fallback_email = self._build_contact_email(company_name, company_website)
+                                if fallback_email and fallback_email != existing_email:
+                                    existing.email = fallback_email
+                                    updated = True
+
+                            if not str(existing.raw_data.get('company_summary') or '').strip():
+                                summary = str(job_info.get('details') or job_info.get('buyer_signal') or '').strip()
+                                if summary:
+                                    existing.raw_data['company_summary'] = summary
+                                    updated = True
+
+                            if updated:
+                                existing.updated_at = datetime.utcnow()
+                                existing.save()
+
                             if scan:
                                 scan.results.leads_updated += 1
                             logger.info(f"[SCAN] Lead already exists: {company_name}")
