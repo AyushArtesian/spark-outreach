@@ -31,8 +31,8 @@ def build_high_intent_fallback_queries(
     max_queries: int,
 ) -> List[str]:
     """
-    Create deterministic high-intent queries if LLM output quality is weak.
-    Generates prospect-finding queries: companies in target industries needing these services.
+    Create deterministic buyer-intent queries to find companies SEEKING our services.
+    Generates prospect-finding queries: companies looking for partners/vendors for these services.
     """
     filters = filters or {}
     profile = company_profile or {}
@@ -65,56 +65,59 @@ def build_high_intent_fallback_queries(
     
     generated = []
 
-    # STRATEGY: Generate queries that find prospect companies (companies that NEED these services)
-    # not just generic service provider listings
+    # CRITICAL CHANGE: Generate queries that find BUYERS of services
+    # Focus on: "seeking partner", "RFP", "looking for vendor", "implementation partner"
     
-    # Pattern 1: Target industry + hiring signal
-    for industry in target_industries[:2]:
-        generated.append(f'{industry} companies "hiring" {service_short} engineers {location}')
-        generated.append(f'{industry} startups recruiting {service_short} developers {location}')
-    
-    # Pattern 2: Target industry + funding signal
-    for industry in target_industries[:2]:
-        generated.append(f'{industry} companies "funded" OR "series a" {location} {service_short}')
-        generated.append(f'venture backed {industry} startups {location} expanding')
-    
-    # Pattern 3: Target industry + modernization/digital transformation
-    for industry in target_industries[:2]:
-        generated.append(f'{industry} "digital transformation" {location} {service_short}')
-        generated.append(f'{industry} companies modernizing legacy systems {location}')
-    
-    # Pattern 4: Target industry + expansion signals
-    generated.append(f'{target_industries[0]} companies growing {location} hiring technical talent')
-    generated.append(f'scale {target_industries[0]} platforms {location} development')
-    
-    # Pattern 5: Service-specific prospect queries
+    # Pattern 1: Companies seeking implementation partners
     for service in top_services[:2]:
-        generated.append(f'{service} "implementation partner" {location} OR remote')
-        generated.append(f'{service} consulting services {location} companies')
+        generated.append(f'{service} "implementation partner" {location}')
+        generated.append(f'looking for {service} company "{location}"')
+        generated.append(f'{service} "vendor selection" OR "partner" {location}')
     
-    # Pattern 6: Technology + industry combinations (if tech stack available)
-    if technologies and target_industries:
-        tech_name = technologies[0]
-        industry_name = target_industries[0]
-        generated.append(f'{industry_name} companies using {tech_name} {location} hiring')
-        generated.append(f'{tech_name} projects {industry_name} sector {location} recruitment')
+    # Pattern 2: RFP and procurement signals
+    for service in top_services[:2]:
+        generated.append(f'{service} "RFP" OR "request for proposal" {location}')
+        generated.append(f'{service} consulting "contact us" {location}')
+        generated.append(f'hire {service} company OR consultant {location}')
     
-    # Pattern 7: RFP and procurement signals in target industries
-    for industry in target_industries[:1]:
-        generated.append(f'{industry} "RFP" OR "vendor selection" {location} {service_short}')
-        generated.append(f'{industry} procurement {service_short} solutions {location}')
+    # Pattern 3: Digital transformation (companies buying services for modernization)
+    for industry in target_industries[:2]:
+        generated.append(f'{industry} "digital transformation" {service_short} {location}')
+        generated.append(f'{industry} modernization {service_short} services {location}')
     
-    # Pattern 8: Job board and hiring page signals
-    for industry in target_industries[:1]:
-        generated.append(f'{industry} company careers page {service_short} {location}')
-        generated.append(f'{industry} tech jobs {location} companies hiring')
+    # Pattern 4: Service providers/agencies in target location
+    for industry in target_industries[:2]:
+        generated.append(f'{industry} {service_short} "agency" OR "firm" {location}')
+        generated.append(f'{industry} {service_short} services {location} company')
     
-    # Pattern 9: Growth stage signals with industry focus
-    generated.append(f'post-series-a {target_industries[0]} companies {location}')
+    # Pattern 5: High-growth companies (likely to buy services)
     generated.append(f'high growth {target_industries[0]} startups {location} {service_short}')
+    generated.append(f'VC backed {target_industries[0]} {location} hiring tech roles')
     
-    # Pattern 10: Primary user query with enhanced context
+    # Pattern 6: Companies with recent funding (likely buyers)
+    for industry in target_industries[:1]:
+        generated.append(f'{industry} "series A" OR "series B" {location} company')
+        generated.append(f'{industry} raised funding {location} expansion')
+    
+    # Pattern 7: Expansion signals (companies scaling = need vendors)
+    generated.append(f'{target_industries[0]} companies expanding {location} {service_short}')
+    generated.append(f'{target_industries[0]} growth stage {service_short} initiatives {location}')
+    
+    # Pattern 8: Direct service request patterns
+    for service in top_services[:1]:
+        generated.append(f'need {service} partner {location}')
+        generated.append(f'seeking {service} specialized firm {location}')
+        generated.append(f'{service} quote OR proposal {location}')
+    
+    # Pattern 9: Industry-specific service needs
+    if technologies:
+        tech_name = technologies[0]
+        generated.append(f'{target_industries[0]} {tech_name} migration {location} services')
+        generated.append(f'implement {tech_name} {target_industries[0]} {location}')
+    
+    # Pattern 10: User-provided context with buyer focus
     if user_query:
-        generated.insert(0, f'{user_query.strip()} {location} companies OR startups')
+        generated.insert(0, f'{user_query.strip()} services {location}')
+        generated.insert(1, f'{user_query.strip()} partner {location}')
 
     return sanitize_queries(generated, max_queries=max_queries)

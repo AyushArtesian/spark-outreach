@@ -15,6 +15,7 @@ import LeadResults from "./pages/LeadResults";
 import AllLeads from "./pages/AllLeads";
 import LeadDetail from "./pages/LeadDetail";
 import SettingsPage from "./pages/Settings";
+import TestDashboard from "./pages/TestDashboard";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
 
@@ -54,6 +55,7 @@ const AppRoutes = () => (
       <Route path="/leads" element={<LeadResults />} />
       <Route path="/lead/:id" element={<LeadDetail />} />
       <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/test" element={<TestDashboard />} />
     </Route>
     <Route path="*" element={<NotFound />} />
   </Routes>

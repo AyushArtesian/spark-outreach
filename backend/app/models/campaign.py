@@ -12,6 +12,10 @@ class Campaign(Document):
     target_audience = StringField()
     status = StringField(default="draft")  # draft, active, paused, completed
     
+    # Intent Monitoring Configuration
+    services = ListField(StringField(), default=list)  # e.g., ["Software Development", "Web Development"]
+    target_locations = ListField(StringField(), default=list)  # e.g., ["India", "USA"]
+    
     # AI/LLM Configuration
     ai_model = StringField(default="gemini-1.5-flash")
     temperature = IntField(default=7)  # 0-10

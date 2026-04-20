@@ -28,6 +28,8 @@ class CampaignUpdate(BaseModel):
     temperature: Optional[int] = None
     max_tokens: Optional[int] = None
     custom_instructions: Optional[str] = None
+    services: Optional[list[str]] = None  # For intent monitoring
+    target_locations: Optional[list[str]] = None  # For intent monitoring
 
 class CampaignResponse(CampaignBase):
     id: str
@@ -37,6 +39,8 @@ class CampaignResponse(CampaignBase):
     max_leads: Optional[int]
     follow_up_enabled: bool
     follow_up_delay_hours: int
+    services: list[str] = []
+    target_locations: list[str] = []
     created_at: datetime
     updated_at: datetime
     started_at: Optional[datetime]

@@ -1,15 +1,27 @@
 """Web scraper service for fetching company website and portfolio content."""
 
 import asyncio
+import importlib
 import os
 import re
 import time
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 from urllib.parse import urljoin, urlparse, quote_plus, parse_qs, unquote
 
 import aiohttp
-from bs4 import BeautifulSoup
 import requests
+
+
+def _load_beautifulsoup():
+    """Load BeautifulSoup lazily so scraping can degrade gracefully when bs4 is absent."""
+    try:
+        module = importlib.import_module("bs4")
+        return getattr(module, "BeautifulSoup", None)
+    except Exception:
+        return None
+
+
+BeautifulSoup = _load_beautifulsoup()
 
 
 MAX_CONTENT_CHARS = 200000  # 200KB total - capture comprehensive company info
@@ -332,6 +344,19 @@ def _is_likely_noise_line(line: str) -> bool:
 
 def _clean_html(html: str) -> str:
     """Extract meaningful visible text from HTML, filtering nav/menu/footer pollution."""
+    if BeautifulSoup is None:
+        # Fallback parser when bs4 is not available in the current environment.
+        text = re.sub(r"(?is)<(script|style|noscript|svg).*?>.*?</\\1>", " ", html or "")
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        chunks = re.split(r"(?<=[.!?])\s+", text)
+        filtered = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if chunk and not _is_likely_noise_line(chunk) and len(chunk) > 10:
+                filtered.append(chunk)
+        return " ".join(filtered)
+
     soup = BeautifulSoup(html, "html.parser")
 
     # Remove non-content elements, footers, sidebars, navigation
@@ -499,7 +524,12 @@ async def _fetch_html(
 
 def _extract_priority_links(base_url: str, homepage_html: str) -> list:
     """Extract all useful internal links from homepage for comprehensive crawling."""
-    soup = BeautifulSoup(homepage_html, "html.parser")
+    if BeautifulSoup is None:
+        hrefs = re.findall(r'href=["\']([^"\']+)["\']', homepage_html or "", flags=re.IGNORECASE)
+    else:
+        soup = BeautifulSoup(homepage_html, "html.parser")
+        hrefs = [a.get("href", "") for a in soup.find_all("a", href=True)]
+
     base_host = urlparse(base_url).netloc
     
     # Expanded keyword list to find comprehensive company info
@@ -516,8 +546,8 @@ def _extract_priority_links(base_url: str, homepage_html: str) -> list:
     
     links = []
 
-    for anchor in soup.find_all("a", href=True):
-        href = anchor["href"].strip()
+    for raw_href in hrefs:
+        href = str(raw_href or "").strip()
         if not href or href.startswith("#") or href.startswith("mailto:") or href.startswith("tel:"):
             continue
         
@@ -762,7 +792,7 @@ def _resolve_duckduckgo_url(raw_href: str) -> str:
     return href
 
 
-def _extract_company_name_from_html(soup: BeautifulSoup, title_text: str) -> str:
+def _extract_company_name_from_html(soup: Any, title_text: str) -> str:
     """Extract a better company name from metadata or prominent headers."""
     title = (title_text or "").strip()
     company_name = ""
@@ -1081,27 +1111,43 @@ async def fetch_company_profile_snapshot(url: str) -> Dict[str, str]:
             if not html:
                 return result
 
-            soup = BeautifulSoup(html, "html.parser")
+            mailto_matches = re.findall(
+                r'href=["\']mailto:([^"\'?]+)',
+                html,
+                flags=re.IGNORECASE,
+            )
 
-            title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
-            name = _extract_company_name_from_html(soup, title)
-            if name:
-                result["company_name"] = name[:120]
-            elif title:
-                result["company_name"] = title.split("|")[0].split("-")[0].strip()[:120]
+            if BeautifulSoup is None:
+                title_match = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+                title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
+                result["company_name"] = title.split("|")[0].split("-")[0].strip()[:120] if title else ""
+                text = re.sub(r"(?is)<(script|style|noscript|svg).*?>.*?</\\1>", " ", html)
+                text = re.sub(r"(?s)<[^>]+>", " ", text)
+            else:
+                soup = BeautifulSoup(html, "html.parser")
+                title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
+                name = _extract_company_name_from_html(soup, title)
+                if name:
+                    result["company_name"] = name[:120]
+                elif title:
+                    result["company_name"] = title.split("|")[0].split("-")[0].strip()[:120]
 
-            text = soup.get_text(" ", strip=True)
+                text = soup.get_text(" ", strip=True)
+
+                if not mailto_matches:
+                    mailto_matches = []
+                    for anchor in soup.find_all("a", href=True):
+                        href = anchor.get("href", "")
+                        if href.startswith("mailto:"):
+                            candidate = href.replace("mailto:", "").split("?")[0].strip()
+                            if candidate:
+                                mailto_matches.append(candidate)
+
             text = re.sub(r"\s+", " ", text)
             result["summary"] = text[:400]
 
             # Prefer explicit mailto links first
-            emails = []
-            for anchor in soup.find_all("a", href=True):
-                href = anchor.get("href", "")
-                if href.startswith("mailto:"):
-                    candidate = href.replace("mailto:", "").split("?")[0].strip()
-                    if candidate:
-                        emails.append(candidate)
+            emails = [str(e).strip() for e in mailto_matches if str(e).strip()]
 
             if not emails:
                 emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
@@ -1287,7 +1333,7 @@ def _search_with_serpapi(query: str, max_retries: int = 2, retry_delay: int = 2)
     params = {
         "q": query,
         "api_key": settings.SERPAPI_KEY,
-        "num": 10,  # Get 10 results per query for filtering
+        "num": 20,  # Get 20 results per query for better filtering
         "engine": "google",
     }
     
@@ -1372,7 +1418,8 @@ def _search_with_serper(query: str, max_retries: int = 2, retry_delay: int = 2) 
     
     payload = {
         "q": query,
-        "num": 10,  # Get 10 results per query for filtering
+        "num": 20,  # Request 20 results (Serper API may return up to 10 organic results per request)
+        # Note: For more results, pagination with 'page' parameter can be used
     }
     
     for attempt in range(max_retries):

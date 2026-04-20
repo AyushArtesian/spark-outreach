@@ -1,7 +1,7 @@
 import { Link, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
-  LayoutDashboard, Search, Users, Building2, Settings, Zap, ChevronLeft, Sparkles,
+  LayoutDashboard, Search, Users, Building2, Settings, Zap, ChevronLeft, Sparkles, Beaker,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -12,6 +12,7 @@ const navItems = [
   { icon: Search, label: "Search Leads", path: "/search" },
   { icon: Users, label: "All Leads", path: "/all-leads" },
   { icon: Users, label: "Leads", path: "/leads" },
+  { icon: Beaker, label: "Test", path: "/test" },
   { icon: Settings, label: "Settings", path: "/settings" },
 ];
 

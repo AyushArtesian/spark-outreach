@@ -1062,6 +1062,50 @@ class LeadService:
         skipped_low_quality = 0
         skipped_no_signal = 0
         skipped_location_mismatch = 0
+        
+        def _is_service_provider_or_wrong_type(company_name: str, snippet: str) -> bool:
+            """Filter out service providers, job boards, and other non-buyers"""
+            text = (f"{company_name} {snippet}").lower()
+            
+            # Service providers/agencies (they SELL services, not BUY)
+            service_provider_keywords = [
+                "design", "agency", "studio", "firm", "consulting", "services",
+                "solution provider", "vendor", "freelance", "outsource",
+                "web designing", "ui/ux", "developer", "programmer",
+            ]
+            
+            # Job boards and recruitment (they're not buyers)
+            job_board_keywords = [
+                "hire", "jobs", "recruitment", "recruiter", "careers",
+                "freelancer", "employment", "hiring platform",
+                "job board", "job portal", "job search"
+            ]
+            
+            # Government and educational (not target buyers)
+            non_buyer_keywords = [
+                "government", "department", "ministry", "federal", "state",
+                "education", "university", "school", "college", "institute",
+                "list of", "directory", "top 10", "top 50", "top 100",
+                "rankings", "comparison", "salary", "comparison tool"
+            ]
+            
+            # Check for service provider patterns
+            if any(kw in text for kw in service_provider_keywords):
+                # However, some companies may be service providers but still builders
+                # So check if they're also actively hiring (expansion signal)
+                if not any(hiring_kw in text for hiring_kw in ["hiring", "recruiting", "jobs open"]):
+                    return True
+            
+            # Check for job boards
+            if any(kw in text for kw in job_board_keywords):
+                return True
+            
+            # Check for non-buyers
+            if any(kw in text for kw in non_buyer_keywords):
+                return True
+            
+            return False
+        
         for item in discovered:
             item_source = str(item.get("source") or "web_discovery").strip().lower()
             domain = self._canonical_domain(item.get("domain") or item.get("url") or item.get("company_website") or "")
@@ -1166,6 +1210,12 @@ class LeadService:
 
             summary_text = (snapshot.get("summary") or "").lower()
             combined_quality_text = f"{company_name.lower()} {snippet} {summary_text}"
+            
+            # Filter out service providers, job boards, and non-buyer companies
+            if _is_service_provider_or_wrong_type(company_name, snippet):
+                skipped_low_quality += 1
+                continue
+            
             if any(
                 token in combined_quality_text
                 for token in [

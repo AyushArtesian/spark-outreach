@@ -1,12 +1,14 @@
 """
 Leads router
 """
-from fastapi import APIRouter, HTTPException, status, Header, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Header, BackgroundTasks, Body
 from typing import List, Optional, Dict, Any
+import logging
 
 from app.models.lead import Lead
 from app.models.user import User
 from app.models.campaign import Campaign
+from app.models.intent import IntentSignal
 from app.schemas.lead import (
     LeadCreate,
     LeadUpdate,
@@ -24,6 +26,8 @@ from app.utils.response import serialize_lead
 from pydantic import BaseModel, Field
 from datetime import datetime
 from bson import ObjectId
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -68,6 +72,12 @@ class IntentScanStatusResponse(BaseModel):
     summary: Dict[str, Any] = Field(default_factory=dict)
     status: str
     scan_id: Optional[str] = None
+
+
+class IntentScanRequest(BaseModel):
+    campaign_ids: Optional[List[str]] = None
+    services: Optional[List[str]] = None
+    locations: Optional[List[str]] = None
 
 
 def _get_company_profile_for_user(user_id: str):
@@ -215,16 +225,39 @@ async def search_leads(
 
 @router.post("/run-intent-scan", response_model=IntentScanStartResponse, status_code=status.HTTP_202_ACCEPTED)
 async def run_intent_scan(
-    background_tasks: BackgroundTasks,
+    scan_request: Optional[IntentScanRequest] = Body(None),
+    background_tasks: BackgroundTasks = None,
     authorization: Optional[str] = Header(None),
 ):
     """Trigger intent monitor scan in the background for current user."""
     from app.services.intent_monitor import intent_monitor_service
 
     current_user = get_current_user_from_token(authorization)
-    scan_id, already_running = await intent_monitor_service.start_scan(str(current_user.id))
+    
+    # Get campaign_ids from request body
+    campaign_ids = None
+    if scan_request and scan_request.campaign_ids:
+        campaign_ids = scan_request.campaign_ids
+    
+    # If no campaign_ids provided, get all active campaigns for the user
+    if not campaign_ids:
+        user_campaigns = Campaign.objects(owner_id=str(current_user.id), status='active')
+        campaign_ids = [str(c.id) for c in user_campaigns]
+    
+    if not campaign_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active campaigns found. Please create and activate a campaign first."
+        )
+    
+    logger.info(f"[SCAN] Starting scan for user {current_user.id} with campaigns: {campaign_ids}")
+    
+    scan_id, already_running = await intent_monitor_service.start_scan(
+        str(current_user.id), 
+        campaign_ids=campaign_ids
+    )
     if not already_running:
-        background_tasks.add_task(intent_monitor_service.run_daily_scan, str(current_user.id), scan_id)
+        background_tasks.add_task(intent_monitor_service.execute_scan, str(current_user.id), scan_id)
 
     return IntentScanStartResponse(
         scan_id=scan_id,
@@ -255,6 +288,69 @@ async def get_intent_scan_status(
         status=str(payload.get("status") or "idle"),
         scan_id=str(payload.get("scan_id") or "") or None,
     )
+
+
+@router.get("/intent-signals", response_model=List[Dict[str, Any]])
+async def get_intent_signals(
+    campaign_id: str,
+    limit: int = 50,
+    authorization: Optional[str] = Header(None),
+):
+    """Get detected intent signals for a campaign."""
+    current_user = get_current_user_from_token(authorization)
+    
+    # Verify user owns the campaign
+    try:
+        campaign = Campaign.objects(id=campaign_id).first()
+    except Exception:
+        campaign = None
+    
+    if not campaign or str(campaign.owner_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this campaign"
+        )
+    
+    # Get intent signals for this campaign, ordered by newest first
+    try:
+        campaign_oid = ObjectId(campaign_id)
+        signals = IntentSignal.objects(campaign_id=campaign_oid).limit(limit).order_by('-detected_at')
+        
+        # Serialize signals
+        result = []
+        for signal in signals:
+            signal_dict = {
+                'id': str(signal.id),
+                'signal_type': signal.signal_type,
+                'strength': signal.strength,
+                'company_id': signal.company_id,
+                'company_url': signal.company_url,
+                'source': signal.source,
+                'detected_at': signal.detected_at.isoformat() if signal.detected_at else None,
+            }
+            
+            # Include details if present
+            if signal.details:
+                signal_dict['details'] = {
+                    'posting_url': signal.details.posting_url,
+                    'posting_title': signal.details.posting_title,
+                    'posting_count': signal.details.posting_count,
+                    'salary_range': signal.details.salary_range,
+                    'required_skills': signal.details.required_skills,
+                    'job_description': signal.details.job_description,
+                    'location': signal.details.location,
+                }
+            
+            result.append(signal_dict)
+        
+        return result
+    except Exception as e:
+        print(f"Error getting intent signals: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get signals: {str(e)}"
+        )
+
 
 @router.post("", response_model=LeadResponse)
 async def create_lead(

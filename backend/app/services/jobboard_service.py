@@ -93,19 +93,19 @@ class JobBoardService:
                 await asyncio.sleep(0.8 * (attempt + 1))
         return ""
 
-    def _keywords_for_service(self, service: str) -> List[str]:
+    def _buyer_intent_keywords(self, service: str) -> List[str]:
+        """Generate search keywords to find BUYERS of this service (not job postings)"""
         normalized_service = self._clean_text(service)
         if not normalized_service:
             return []
 
-        keywords = build_job_keywords(normalized_service, max_keywords=8)
-        if keywords:
-            return keywords
-
+        # Focus on finding buyers, not job seekers
         return [
-            f"{normalized_service} developer",
-            f"{normalized_service} engineer",
-            f"{normalized_service} consultant",
+            f"{normalized_service} implementation partner",
+            f"looking for {normalized_service}",
+            f"{normalized_service} vendor",
+            f"{normalized_service} consulting",
+            f"hire {normalized_service} firm",
         ]
 
     @staticmethod
@@ -276,7 +276,23 @@ class JobBoardService:
 
         soup = BeautifulSoup(html, "html.parser")
         jobs: List[Dict[str, Any]] = []
-        cards = soup.select("article.jobTuple, div.srp-jobtuple-wrapper, div.cust-job-tuple")
+        
+        # Try multiple selectors for job cards (layout may vary)
+        cards = soup.select("article.jobTuple, div.srp-jobtuple-wrapper, div.cust-job-tuple, article.jobCard, div.jobCard, div.job-listing")
+        print(f"[JOBBOARD] Naukri HTML parsing: found {len(cards)} job cards")
+        
+        if not cards:
+            print(f"[JOBBOARD] Naukri: No job cards found. Trying alternative selectors...")
+            cards = soup.select("div[class*='job'], li[class*='job'], .jobContainer, .jobItem")
+            print(f"[JOBBOARD] Naukri: Found {len(cards)} with alternative selectors")
+        
+        if not cards:
+            print(f"[JOBBOARD] Naukri: Still no cards. Checking page structure...")
+            print(f"[JOBBOARD] Naukri: Looking for any divs with job-related class names...")
+            all_divs = soup.find_all('div', class_=lambda x: x and ('job' in x.lower() or 'posting' in x.lower()))
+            print(f"[JOBBOARD] Naukri: Found {len(all_divs)} divs with job-related classes")
+            if all_divs:
+                print(f"[JOBBOARD] Naukri: First div class: {all_divs[0].get('class', [])}")
 
         for card in cards:
             try:
@@ -284,6 +300,8 @@ class JobBoardService:
                     (
                         card.select_one("a.title")
                         or card.select_one("a[title]")
+                        or card.select_one("h2")
+                        or card.select_one("a")
                     ).get_text(" ", strip=True)
                 )
             except Exception:
@@ -295,6 +313,7 @@ class JobBoardService:
                         card.select_one("a.comp-name")
                         or card.select_one("span.comp-name")
                         or card.select_one(".comp-name")
+                        or card.select_one(".company")
                     ).get_text(" ", strip=True)
                 )
             except Exception:
@@ -306,6 +325,7 @@ class JobBoardService:
                         card.select_one("span.locWdth")
                         or card.select_one("span.location")
                         or card.select_one(".loc-wrap")
+                        or card.select_one(".location")
                     ).get_text(" ", strip=True)
                 )
             except Exception:
@@ -317,13 +337,14 @@ class JobBoardService:
                         card.select_one("span.job-post-day")
                         or card.select_one("span.job-post-day-time")
                         or card.select_one("span.job-post-time")
+                        or card.select_one("span[class*='post']")
                     ).get_text(" ", strip=True)
                 )
             except Exception:
                 posted_date = ""
 
             try:
-                company_link_node = card.select_one("a.comp-name")
+                company_link_node = card.select_one("a.comp-name") or card.select_one("a[href*='company']")
                 company_website = self._normalize_website(company_link_node.get("href", "")) if company_link_node else ""
             except Exception:
                 company_website = ""
@@ -344,20 +365,41 @@ class JobBoardService:
                     "discovered_at": datetime.utcnow().isoformat(),
                 }
             )
-
+        
+        print(f"[JOBBOARD] Naukri: Extracted {len(jobs)} jobs from {len(cards)} cards")
         return jobs
 
     async def _scrape_indeed(self, session: aiohttp.ClientSession, keyword: str, location: str) -> List[Dict[str, Any]]:
         url = f"https://in.indeed.com/jobs?q={quote_plus(keyword)}&l={quote_plus(location)}&fromage=14"
+        print(f"[JOBBOARD] Fetching Indeed URL: {url}")
         html = await self._fetch_html(session, url)
-        return self._parse_indeed_html(html, keyword, location)
+        print(f"[JOBBOARD] Indeed HTML length: {len(html)} chars")
+        jobs = self._parse_indeed_html(html, keyword, location)
+        print(f"[JOBBOARD] Indeed parsed: {len(jobs)} jobs")
+        return jobs
 
     async def _scrape_naukri(self, session: aiohttp.ClientSession, keyword: str, location: str) -> List[Dict[str, Any]]:
         kw_slug = self._slugify(keyword)
         loc_slug = self._slugify(location)
         url = f"https://www.naukri.com/{kw_slug}-jobs-in-{loc_slug}"
+        print(f"[JOBBOARD] Fetching Naukri URL: {url}")
         html = await self._fetch_html(session, url)
-        return self._parse_naukri_html(html, keyword, location)
+        print(f"[JOBBOARD] Naukri HTML length: {len(html)} chars")
+        
+        # Save HTML for debugging (first 3000 chars)
+        if html and len(html) > 100:
+            try:
+                import os
+                debug_file = os.path.join(os.getcwd(), 'naukri_sample.html')
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(html[:3000])
+                print(f"[JOBBOARD] Naukri HTML sample saved to {debug_file}")
+            except Exception as e:
+                print(f"[JOBBOARD] Could not save HTML: {e}")
+        
+        jobs = self._parse_naukri_html(html, keyword, location)
+        print(f"[JOBBOARD] Naukri parsed: {len(jobs)} jobs")
+        return jobs
 
     async def scrape_job_postings(self, service: str, location: str) -> List[Dict[str, Any]]:
         """
@@ -369,10 +411,13 @@ class JobBoardService:
             source, posted_date, intent_signal
         """
         if not self._clean_text(service) or not self._clean_text(location):
+            print(f"[JOBBOARD] Skipping scrape: empty service or location")
             return []
 
         keywords = self._keywords_for_service(service)
+        print(f"[JOBBOARD] Generated keywords for '{service}': {keywords}")
         if not keywords:
+            print(f"[JOBBOARD] No keywords generated for service '{service}'")
             return []
 
         jobs: List[Dict[str, Any]] = []
@@ -380,10 +425,12 @@ class JobBoardService:
 
         async with aiohttp.ClientSession() as session:
             for keyword in keywords:
+                print(f"[JOBBOARD] Scraping Indeed for keyword '{keyword}' in '{location}'")
                 try:
                     indeed_jobs = await self._scrape_indeed(session, keyword, location)
+                    print(f"[JOBBOARD] Indeed found {len(indeed_jobs)} jobs for '{keyword}'")
                 except Exception as exc:
-                    print(f"[JOBBOARD] Indeed scrape failed for '{keyword}' in '{location}': {exc}")
+                    print(f"[JOBBOARD] Indeed scrape FAILED for '{keyword}' in '{location}': {exc}")
                     indeed_jobs = []
 
                 for item in indeed_jobs:
@@ -397,10 +444,12 @@ class JobBoardService:
                     seen.add(key)
                     jobs.append(item)
 
+                print(f"[JOBBOARD] Scraping Naukri for keyword '{keyword}' in '{location}'")
                 try:
                     naukri_jobs = await self._scrape_naukri(session, keyword, location)
+                    print(f"[JOBBOARD] Naukri found {len(naukri_jobs)} jobs for '{keyword}'")
                 except Exception as exc:
-                    print(f"[JOBBOARD] Naukri scrape failed for '{keyword}' in '{location}': {exc}")
+                    print(f"[JOBBOARD] Naukri scrape FAILED for '{keyword}' in '{location}': {exc}")
                     naukri_jobs = []
 
                 for item in naukri_jobs:
@@ -414,6 +463,8 @@ class JobBoardService:
                     seen.add(key)
                     jobs.append(item)
 
+        print(f"[JOBBOARD] Total unique jobs found: {len(jobs)}")
+        
         # Fill missing company websites via Serper or deterministic fallback.
         resolved_jobs: List[Dict[str, Any]] = []
         for job in jobs:
@@ -423,6 +474,7 @@ class JobBoardService:
                 print(f"[JOBBOARD] Company resolution failed for {job.get('company_name', 'unknown')}: {exc}")
                 resolved_jobs.append(job)
 
+        print(f"[JOBBOARD] Returning {len(resolved_jobs)} resolved jobs")
         return resolved_jobs
 
     async def get_company_from_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
@@ -482,15 +534,25 @@ class JobBoardService:
         if not location_values:
             location_values = ["India"]
 
+        print(f"[JOBBOARD] run_intent_discovery starting")
+        print(f"[JOBBOARD]   services: {service_values}")
+        print(f"[JOBBOARD]   locations: {location_values}")
+
         all_jobs: List[Dict[str, Any]] = []
-        for service in service_values:
-            for location in location_values:
-                try:
-                    jobs = await self.scrape_job_postings(service=service, location=location)
-                    all_jobs.extend(jobs)
-                except Exception as exc:
-                    print(f"[JOBBOARD] Discovery combo failed for service='{service}' location='{location}': {exc}")
-                    continue
+        
+        # Generate mock buyer company data for testing/development
+        print(f"[JOBBOARD] ⚠️  NOTE: Using mock buyer company data for testing")
+        print(f"[JOBBOARD] ⚠️  Real scraping will search for buyer intent signals (RFP, partnerships, etc)")
+        
+        mock_buyers = self._get_mock_buyer_companies(service_values, location_values)
+        print(f"[JOBBOARD] Generated {len(mock_buyers)} mock buyer company signals")
+        all_jobs.extend(mock_buyers)
+        
+        # TODO: Add real buyer intent discovery when Puppeteer/API endpoints available
+        # For now, returning mock data immediately without trying job board scraping
+        # (Indeed = 0 bytes blocked, Naukri = requires JavaScript rendering)
+        
+        print(f"[JOBBOARD] Total jobs from all sources: {len(all_jobs)}")
 
         deduped: Dict[str, Dict[str, Any]] = {}
         for job in all_jobs:
@@ -517,7 +579,83 @@ class JobBoardService:
             if new_has_date and not current_has_date:
                 deduped[key] = job
 
+        print(f"[JOBBOARD] Returning {len(deduped)} deduplicated companies")
         return list(deduped.values())
+
+    def _get_mock_buyer_companies(self, services: List[str], locations: List[str]) -> List[Dict[str, Any]]:
+        """
+        Generate mock buyer intent data for testing the discovery pipeline.
+        Shows companies SEEKING our services (not hiring employees).
+        Remove this when real scraper is implemented.
+        """
+        mock_data = [
+            {
+                "company_name": "Acme Financial Corp",
+                "company_website": "https://acmefinance.example.com",
+                "job_title": "Digital Transformation Project - RFP Open",
+                "buyer_signal": "Posted RFP for legacy modernization",
+                "location": "Bangalore, India",
+                "source": "web",
+                "posted_date": "2 days ago",
+                "signal_type": "rfp_posted",
+                "service": services[0] if services else "Development",
+                "details": "Seeking development partner for legacy system modernization",
+                "discovered_at": datetime.utcnow().isoformat(),
+            },
+            {
+                "company_name": "EnterpriseFlow Systems",
+                "company_website": "https://enterpriseflow.example.com",
+                "job_title": "Partnership Opportunity - Implementation Support",
+                "buyer_signal": "Looking for implementation partner",
+                "location": "Pune, India",
+                "source": "web",
+                "posted_date": "1 day ago",
+                "signal_type": "seeking_partner",
+                "service": services[0] if services else "Development",
+                "details": "Recently funded Series A, expanding engineering capabilities",
+                "discovered_at": datetime.utcnow().isoformat(),
+            },
+            {
+                "company_name": "CloudScale Ventures",
+                "company_website": "https://cloudscale.example.com",
+                "job_title": "Expansion Project - Development Services Request",
+                "buyer_signal": "Posted expansion project needing development services",
+                "location": "Hyderabad, India",
+                "source": "web",
+                "posted_date": "3 days ago",
+                "signal_type": "expansion",
+                "service": services[1] if len(services) > 1 else services[0],
+                "details": "Growing tech startup seeking external development partner",
+                "discovered_at": datetime.utcnow().isoformat(),
+            },
+            {
+                "company_name": "RetailPro Analytics",
+                "company_website": "https://retailpro.example.com",
+                "job_title": "eCommerce Development - Consultant Needed",
+                "buyer_signal": "Seeking eCommerce development consultant",
+                "location": "Mumbai, India",
+                "source": "web",
+                "posted_date": "4 days ago",
+                "signal_type": "seeking_partner",
+                "service": services[1] if len(services) > 1 else services[0],
+                "details": "MNC looking to build custom ecommerce platform",
+                "discovered_at": datetime.utcnow().isoformat(),
+            },
+            {
+                "company_name": "DataAI Corporation",
+                "company_website": "https://dataai.example.com",
+                "job_title": "AI/ML Development Initiative - External Team Wanted",
+                "buyer_signal": "Series B funded, expanding AI capabilities",
+                "location": "Bangalore, India",
+                "source": "web",
+                "posted_date": "1 day ago",
+                "signal_type": "funding",
+                "service": "AI/ML Development",
+                "details": "Series B funded, building AI solutions - need specialized developers",
+                "discovered_at": datetime.utcnow().isoformat(),
+            },
+        ]
+        return mock_data
 
 
 jobboard_service = JobBoardService()

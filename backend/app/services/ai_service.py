@@ -3,6 +3,7 @@ Service for AI-related operations including embeddings and message generation.
 """
 
 import asyncio
+import importlib
 import json
 import re
 import warnings
@@ -474,14 +475,26 @@ RETRIEVED_COMPANY_CONTEXT:
 """
 
         user_prompt = (
-            f"Generate {limit} Google search queries to find companies in {target_locations_str} "
+            f"Generate {limit} DIFFERENT Google search queries to find companies in {target_locations_str} "
             f"needing {services_str or 'these services'}.\n\n"
-            f"Target Industries: {target_industries_str}\n"
+            f"Generate MANY varied queries with different angles:\n"
+            f"- Companies seeking {services_str or 'these services'}\n"
+            f"- RFP/vendor searches\n"
+            f"- Digital transformation initiatives\n"
+            f"- Expansion/growth signals\n"
+            f"- Funded companies in {target_industries_str}\n\n"
             f"Location: {location_hint or target_locations_str}\n"
+            f"Industries: {target_industries_str}\n"
             f"Services: {services_str}\n\n"
-            "Rules: 8-13 words per query, include location, mix buying signals (hiring/funded/expanding/modernizing), no quotes, minimal operators.\n\n"
-            "Return ONLY JSON:\n"
-            "{\"queries\":[\"query_1\",\"query_2\",\"query_3\",\"query_4\",\"query_5\",\"query_6\",\"query_7\",\"query_8\"]}"
+            "Rules:\n"
+            "- 8-14 words per query\n"
+            "- MUST include location or industry keywords\n"
+            "- Include varied buying signals: implementing, seeking partner, RFP, hiring, funded, expansion\n"
+            "- Minimize quotes - use sparingly for exact phrases only\n"
+            "- Each query should find BUYERS of these services, not sellers\n"
+            "- Generate at least 8 completely different queries\n\n"
+            "Return ONLY valid JSON with no explanations:\n"
+            "{\"queries\":[\"query_1\",\"query_2\",\"query_3\",\"query_4\",\"query_5\",\"query_6\",\"query_7\",\"query_8\",\"query_9\",\"query_10\"]}"
         )
 
         try:
@@ -500,9 +513,9 @@ RETRIEVED_COMPANY_CONTEXT:
             raw_response = await groq_provider.call_chat_completion(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                temperature=0.0,  # Reduced from 0.18 to 0 for deterministic output
-                max_tokens=320,   # Reduced from 520
-                require_json=True,  # Explicitly require JSON
+                temperature=0.5,  # Slightly higher for query variety
+                max_tokens=1024,   # Increased to allow 10+ queries
+                require_json=False,  # More lenient JSON parsing
             )
 
             # Strip reasoning traces FIRST before JSON parsing
@@ -620,7 +633,7 @@ RETRIEVED_COMPANY_CONTEXT:
             if (
                 avg_score_first < 0.55
                 or search_effectiveness < 0.6
-                or len(ranked_queries) < max(6, min(8, limit))
+                or len(ranked_queries) < 4  # Lower threshold: accept 4+ queries, don't always require 6-8
             ):
                 print(
                     f"[LEAD QUERY PLANNER] Triggering refinement: "
@@ -675,7 +688,9 @@ RETRIEVED_COMPANY_CONTEXT:
                     min_score=0.50,
                 )
 
-            if len(ranked_queries) < max(6, min(8, limit)):
+            # Always ensure we have enough queries - add fallback if needed
+            minimum_queries_needed = max(6, min(8, limit))  # Ensure at least 6-8 queries final
+            if len(ranked_queries) < minimum_queries_needed:
                 fallback_queries = build_high_intent_fallback_queries(
                     user_query=user_query,
                     filters=active_filters,
@@ -739,19 +754,31 @@ ai_service = AIService()
 
 # Global model cache for embeddings
 _embeddings_model = None
+_embeddings_model_load_failed = False
 
 
 def _get_embeddings_model():
     """Lazy load the SentenceTransformer model."""
-    global _embeddings_model
+    global _embeddings_model, _embeddings_model_load_failed
+    if _embeddings_model_load_failed:
+        return None
+
     if _embeddings_model is None:
         try:
-            from sentence_transformers import SentenceTransformer
+            module = importlib.import_module("sentence_transformers")
+            sentence_transformer_cls = getattr(module, "SentenceTransformer", None)
+            if sentence_transformer_cls is None:
+                raise ImportError("SentenceTransformer class not found in sentence_transformers module")
 
             print("Loading SentenceTransformer model (paraphrase-mpnet-base-v2)...")
-            _embeddings_model = SentenceTransformer("paraphrase-mpnet-base-v2")
+            _embeddings_model = sentence_transformer_cls("paraphrase-mpnet-base-v2")
             print("SentenceTransformer model loaded successfully!")
+        except ImportError:
+            _embeddings_model_load_failed = True
+            print("sentence-transformers package not installed; using zero vector fallback")
+            return None
         except Exception as e:
+            _embeddings_model_load_failed = True
             print(f"Error loading SentenceTransformer model: {e}")
             return None
     return _embeddings_model
