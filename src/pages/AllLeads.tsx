@@ -19,6 +19,9 @@ interface LeadScore {
     tech_stack?: number;
     contact_availability?: number;
     size_fit?: number;
+    company_fit?: number;
+    buyer_signal_strength?: number;
+    accessibility?: number;
   };
   is_hot_lead: boolean;
   recommended_action: string;
@@ -49,20 +52,25 @@ const GRADE_STYLES: Record<string, string> = {
   D: "bg-[#6c757d] text-white",
 };
 
-const BREAKDOWN_MAX: Record<string, number> = {
-  service_fit: 30,
-  intent_score: 25,
-  tech_stack: 20,
-  contact_availability: 15,
-  size_fit: 10,
-};
+const LEGACY_BREAKDOWN_ROWS = [
+  { key: "service_fit", label: "Service Fit", max: 30 },
+  { key: "intent_score", label: "Intent", max: 25 },
+  { key: "tech_stack", label: "Tech Stack", max: 20 },
+  { key: "contact_availability", label: "Contact", max: 15 },
+  { key: "size_fit", label: "Size Fit", max: 10 },
+];
 
-const BREAKDOWN_LABELS: Record<string, string> = {
-  service_fit: "Service Fit",
-  intent_score: "Intent",
-  tech_stack: "Tech Stack",
-  contact_availability: "Contact",
-  size_fit: "Size Fit",
+const MODERN_BREAKDOWN_ROWS = [
+  { key: "company_fit", label: "Company Fit", max: 40 },
+  { key: "buyer_signal_strength", label: "Buyer Signals", max: 40 },
+  { key: "accessibility", label: "Accessibility", max: 20 },
+];
+
+const getBreakdownRows = (breakdown?: LeadScore["breakdown"]) => {
+  const card = breakdown || {};
+  const hasModern = MODERN_BREAKDOWN_ROWS.some((row) => Object.prototype.hasOwnProperty.call(card, row.key));
+  if (hasModern) return MODERN_BREAKDOWN_ROWS;
+  return LEGACY_BREAKDOWN_ROWS;
 };
 
 const priorityConfig: Record<string, { color: string; emoji: string }> = {
@@ -111,10 +119,10 @@ export default function AllLeads() {
         }
       : {
           total_score: legacyScore100,
-          grade: legacyScore100 >= 70 ? "A" : legacyScore100 >= 50 ? "B" : legacyScore100 >= 30 ? "C" : "D",
+          grade: legacyScore100 >= 80 ? "A" : legacyScore100 >= 60 ? "B" : legacyScore100 >= 40 ? "C" : "D",
           breakdown: {},
-          is_hot_lead: legacyScore100 >= 70,
-          recommended_action: legacyScore100 >= 70 ? "contact_immediately" : legacyScore100 >= 50 ? "add_to_sequence" : legacyScore100 >= 30 ? "nurture" : "skip",
+          is_hot_lead: legacyScore100 >= 80,
+          recommended_action: legacyScore100 >= 80 ? "contact_immediately" : legacyScore100 >= 60 ? "add_to_sequence" : legacyScore100 >= 40 ? "nurture" : "skip",
         };
 
     return {
@@ -304,6 +312,7 @@ export default function AllLeads() {
               const priority = grade === "A" ? "High" : grade === "B" ? "Medium" : grade === "C" ? "Low" : "Low";
               const isExpanded = Boolean(expandedScore[lead.id]);
               const breakdown = lead.score?.breakdown || {};
+              const breakdownRows = getBreakdownRows(breakdown);
 
               return (
                 <motion.div key={lead.id} variants={item}>
@@ -342,14 +351,13 @@ export default function AllLeads() {
 
                           {isExpanded && (
                             <div className="mt-3 ml-14 rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2">
-                              {Object.keys(BREAKDOWN_MAX).map((key) => {
-                                const max = BREAKDOWN_MAX[key];
+                              {breakdownRows.map(({ key, label, max }) => {
                                 const value = Number((breakdown as any)[key] || 0);
                                 const width = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
                                 return (
                                   <div key={key}>
                                     <div className="flex items-center justify-between text-xs mb-1">
-                                      <span className="text-muted-foreground">{BREAKDOWN_LABELS[key]}</span>
+                                      <span className="text-muted-foreground">{label}</span>
                                       <span className="font-medium text-foreground">{value}/{max}</span>
                                     </div>
                                     <div className="h-2 rounded-full bg-muted overflow-hidden">

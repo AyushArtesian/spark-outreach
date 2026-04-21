@@ -124,49 +124,47 @@ def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
     if text.count('"') > 6:
         return False
 
-    # Require at least one intent/live-market trigger (much broader list now)
+    # Reject obvious seller/vendor targeting patterns.
+    seller_patterns = [
+        "top web development companies",
+        "best app development companies",
+        "software development agency",
+        "hire dedicated developers",
+        "it services company",
+        "training institute",
+        "course",
+        "freelancer platform",
+    ]
+    if any(fragment in text for fragment in seller_patterns):
+        return False
+
+    # Require at least one buyer-intent or company-discovery trigger.
     intent_triggers = [
-        "hiring",
-        "recruiting",
+        "looking for",
+        "seeking",
+        "vendor",
+        "implementation",
+        "rfp",
+        "procurement",
+        "digital transformation",
+        "erp",
         "funded",
         "funding",
         "series",
-        "rfp",
-        "request for proposal",
-        "procurement",
-        "migration",
-        "modernization",
-        "implementation",
-        "partner",
-        "growth",
-        "growing",
-        "expansion",
-        "expanding",
-        "expanding",
-        "scale",
-        "scaling",
-        "startup",
         "startups",
-        "venture",
-        "backed",
+        "companies",
+        "cto",
+        "it manager",
+        "growth",
+        "expansion",
         "2026",
-        "this year",
-        "recent",
-        "now",
-        "digital",
-        "transformation",
-        "consulting",
-        "services",
-        "solutions",
     ]
     if not any(token in text for token in intent_triggers):
         return False
 
-    # Location check is now OPTIONAL - not all queries need explicit location
-    # The system is retrying with relaxed queries anyway if they don't match
+    # Strict location check: planned queries must include requested location tokens.
     if location:
         location_hint = _normalize_location_text(location) or str(location).strip().lower()
-        # Much more lenient - just check if ANY location keyword appears
         location_keywords = [location_hint] + location_hint.split() if location_hint else []
         if location_keywords and not any(kw in text for kw in location_keywords if len(kw) >= 3):
             return False
@@ -209,69 +207,61 @@ def generate_high_intent_queries(
     max_queries: int = 15,
     log_prefix: str = "[QUERY GENERATION: HEURISTIC]",
 ) -> List[str]:
-    """Generate 10-15 high-intent buying-signal queries for lead discovery."""
+    """Generate high-intent BUYER-side queries for lead discovery."""
     normalized_location = _normalize_location_text(location) or ""
+    if not normalized_location:
+        normalized_location = "india"
+
     normalized_industry = (industry or "").strip().lower()
-    industry_term = normalized_industry if normalized_industry and normalized_industry != "all" else "software"
+    priority_industries = [
+        "manufacturing",
+        "retail",
+        "healthcare",
+        "finance",
+        "logistics",
+        "real estate",
+        "hospitality",
+    ]
+    if normalized_industry and normalized_industry != "all":
+        industries = [normalized_industry]
+    else:
+        industries = priority_industries[:3]
 
     service_items = [str(s).strip().lower() for s in (service_focus or []) if str(s).strip()]
-    primary_service = service_items[0] if service_items else "backend development"
-    service_tokens = [t for t in re.split(r"\W+", primary_service) if t]
-    service_short = " ".join(service_tokens[:3]) or "backend"
-
+    primary_service = service_items[0] if service_items else "web development"
     cleaned_seed = _clean_search_query_text(query)
-    
-    # === CHECK IF THIS IS SERVICE/PROVIDER FOCUSED (not buyer hiring) ===
-    # If industry is specific (e-commerce, fintech, etc.) and service_focus exists,
-    # generate PROVIDER queries (companies that sell solutions), not BUYER queries
-    is_provider_focus = (
-        normalized_industry and 
-        normalized_industry != "all" and 
-        normalized_industry != "software" and
-        service_items
-    )
-    
-    if is_provider_focus:
-        # === PROVIDER QUERIES: Find companies that BUILD/SELL solutions ===
-        templates = [
-            f"{industry_term} solution providers {normalized_location}".strip(),
-            f"custom {industry_term} development companies {normalized_location}".strip(),
-            f"{industry_term} platform development agencies {normalized_location}".strip(),
-            f"{industry_term} consulting companies {normalized_location}".strip(),
-            f"{industry_term} software development firms {normalized_location}".strip(),
-            f"{industry_term} technology partners {normalized_location}".strip(),
-            f"companies building {industry_term} solutions {normalized_location}".strip(),
-            f"{industry_term} system integrators {normalized_location}".strip(),
-            f"{service_short} development for {industry_term} {normalized_location}".strip(),
-            f"{industry_term} implementation partners {normalized_location}".strip(),
-            f"managed {industry_term} services providers {normalized_location}".strip(),
-            f"{industry_term} product companies {normalized_location}".strip(),
-            f"enterprise {industry_term} solution vendors {normalized_location}".strip(),
-            f"{industry_term} modernization services {normalized_location}".strip(),
-            f"digital transformation {industry_term} agencies {normalized_location}".strip(),
-        ]
-    else:
-        # === BUYER QUERIES: Find companies that are actively hiring (original template) ===
-        templates = [
-            f"{industry_term} companies hiring {service_short} engineers {normalized_location}".strip(),
-            f"startups in {normalized_location} hiring software engineers".strip(),
-            f"companies scaling backend systems {normalized_location}".strip(),
-            f"recently funded startups {normalized_location} {industry_term}".strip(),
-            f"{industry_term} product companies expanding engineering teams {normalized_location}".strip(),
-            f"b2b saas companies in {normalized_location} looking for {service_short}".strip(),
-            f"{industry_term} platform companies {normalized_location} hiring developers".strip(),
-            f"fast growing saas startups {normalized_location} engineering hiring".strip(),
-            f"{industry_term} companies modernizing legacy systems {normalized_location}".strip(),
-            f"venture backed {industry_term} startups {normalized_location}".strip(),
-            f"product companies in {normalized_location} scaling cloud infrastructure".strip(),
-            f"technology startups {normalized_location} hiring backend developers".strip(),
-            f"{industry_term} companies launching new product features {normalized_location}".strip(),
-            f"series a series b startups {normalized_location} {industry_term}".strip(),
-            f"software platform businesses {normalized_location} engineering expansion".strip(),
-        ]
+
+    templates = [
+        f"companies in {normalized_location} need {primary_service}",
+        f"{normalized_location} startups looking for {primary_service} partner",
+        f"{primary_service} vendor selection {normalized_location}",
+        f"{primary_service} request for proposal {normalized_location}",
+        f"digital transformation projects {normalized_location} {primary_service}",
+        f"site:linkedin.com/company {normalized_location} CTO IT manager",
+        f"site:clutch.co {normalized_location} project requirements {primary_service}",
+    ]
+
+    for vertical in industries[:3]:
+        templates.extend(
+            [
+                f"top {vertical} companies in {normalized_location}",
+                f"funded {vertical} startups {normalized_location}",
+                f"{vertical} companies {normalized_location} digital transformation",
+                f"{vertical} companies {normalized_location} ERP modernization",
+            ]
+        )
+
+    if "dynamics" in primary_service or "erp" in primary_service:
+        templates.extend(
+            [
+                f"{normalized_location} companies using SAP OR Oracle ERP",
+                f"{normalized_location} manufacturing company IT requirements ERP",
+                f"{normalized_location} ERP implementation partner requirement",
+            ]
+        )
 
     if cleaned_seed:
-        templates.insert(0, cleaned_seed)
+        templates.insert(0, f"{cleaned_seed} companies in {normalized_location} looking for partner")
 
     deduped = []
     seen = set()
@@ -287,10 +277,10 @@ def generate_high_intent_queries(
     # Ensure minimum query count even for sparse inputs.
     while len(deduped) < min_queries:
         fallback = _compact_query([
-            industry_term,
+            industries[0],
             primary_service,
             normalized_location,
-            f"growth hiring signal query {len(deduped) + 1}",
+            f"buyer intent company query {len(deduped) + 1}",
         ], max_len=220).strip().lower()
         if fallback and fallback not in seen:
             deduped.append(fallback)
@@ -299,8 +289,7 @@ def generate_high_intent_queries(
             break
 
     # Debug logging
-    query_type = "PROVIDER" if is_provider_focus else "BUYER"
-    print(f"{log_prefix} Type: {query_type} | Industry: {industry_term} | Service: {service_short} | Location: {normalized_location}")
+    print(f"{log_prefix} Type: BUYER | Industry: {','.join(industries)} | Service: {primary_service} | Location: {normalized_location}")
     for i, q in enumerate(deduped[:5], 1):
         print(f"{log_prefix} Query {i}: {q}")
     
@@ -1480,6 +1469,107 @@ def _search_with_serper(query: str, max_retries: int = 2, retry_delay: int = 2) 
     return None
 
 
+def _discover_companies_with_google_maps(
+    location: Optional[str],
+    industry: Optional[str],
+    service_focus: Optional[list],
+    max_results: int = 10,
+) -> List[Dict[str, Any]]:
+    """Discover local SMB companies via Google Maps Places API when configured."""
+    from app.config import settings
+
+    key = str(settings.GOOGLE_MAPS_API_KEY or "").strip()
+    if not key:
+        return []
+
+    normalized_location = _normalize_location_text(location) or str(location or "").strip().lower()
+    if not normalized_location:
+        normalized_location = "india"
+
+    requested_industry = str(industry or "").strip().lower()
+    preferred_industries = [
+        requested_industry if requested_industry and requested_industry != "all" else "manufacturing",
+        "retail",
+        "healthcare",
+        "logistics",
+    ]
+
+    service_label = " ".join([str(s).strip() for s in (service_focus or []) if str(s).strip()][:1]).lower()
+    if not service_label:
+        service_label = "digital transformation"
+
+    search_terms: List[str] = []
+    for vertical in preferred_industries:
+        search_terms.append(f"{vertical} company {normalized_location}")
+    search_terms.append(f"SMB business {normalized_location} {service_label}")
+
+    discovered: List[Dict[str, Any]] = []
+    seen_domains: set[str] = set()
+
+    for term in search_terms:
+        try:
+            response = requests.get(
+                "https://maps.googleapis.com/maps/api/place/textsearch/json",
+                params={"query": term, "key": key},
+                timeout=10,
+            )
+            if response.status_code != 200:
+                continue
+
+            payload = response.json() or {}
+            for place in payload.get("results", [])[:8]:
+                company_name = str(place.get("name") or "").strip()
+                if not company_name:
+                    continue
+
+                website = ""
+                place_id = str(place.get("place_id") or "").strip()
+                if place_id:
+                    try:
+                        details_response = requests.get(
+                            "https://maps.googleapis.com/maps/api/place/details/json",
+                            params={"place_id": place_id, "fields": "website", "key": key},
+                            timeout=10,
+                        )
+                        if details_response.status_code == 200:
+                            details_payload = details_response.json() or {}
+                            website = str((details_payload.get("result") or {}).get("website") or "").strip()
+                    except Exception:
+                        website = ""
+
+                if not website:
+                    continue
+
+                parsed = urlparse(website if website.startswith(("http://", "https://")) else f"https://{website}")
+                domain = (parsed.netloc or "").lower().replace("www.", "")
+                if not domain or domain in seen_domains:
+                    continue
+
+                snippet = str(place.get("formatted_address") or place.get("vicinity") or "").strip()
+                if not snippet:
+                    snippet = f"Google Maps listed company in {normalized_location}"
+
+                seen_domains.add(domain)
+                discovered.append(
+                    {
+                        "name": company_name[:120],
+                        "title": company_name[:180],
+                        "url": f"https://{domain}",
+                        "domain": domain,
+                        "snippet": snippet[:300],
+                        "buyer_intent_signal": True,
+                        "source": "google_maps",
+                    }
+                )
+
+                if len(discovered) >= max_results:
+                    return discovered
+        except Exception as e:
+            print(f"Google Maps discovery failed for term '{term}': {e}")
+
+    return discovered
+
+
 async def discover_company_websites(
     query: str,
     location: Optional[str] = None,
@@ -1584,6 +1674,23 @@ async def discover_company_websites(
     seen_domains = set()
     request_delay = 1.5  # 1.5 second delay between queries
     zero_result_streak = 0
+
+    maps_candidates = _discover_companies_with_google_maps(
+        location=location,
+        industry=industry,
+        service_focus=service_focus,
+        max_results=min(8, max_results),
+    )
+    if maps_candidates:
+        for candidate in maps_candidates:
+            domain = str(candidate.get("domain") or "").strip().lower()
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            results.append(candidate)
+            if len(results) >= max_results:
+                break
+        print(f"[DISCOVERY SOURCES] google_maps={len(maps_candidates)} accepted={len(results)}")
 
     try:
         for idx, search_query in enumerate(generated_queries):

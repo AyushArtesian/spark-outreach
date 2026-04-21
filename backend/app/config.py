@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # SerpAPI & Serper API (for search)
     SERPAPI_KEY: Optional[str] = None
     SERPER_API_KEY: Optional[str] = None
+    GOOGLE_MAPS_API_KEY: Optional[str] = None
+
+    # Buyer discovery source toggles
+    JOBBOARD_ENABLE_INDEED: bool = False
+    JOBBOARD_ENABLE_NAUKRI: bool = False
+    JOBBOARD_ENABLE_WEB_INTENT: bool = True
 
     # Optional enrichment APIs
     WAPPALYZER_API_KEY: Optional[str] = None

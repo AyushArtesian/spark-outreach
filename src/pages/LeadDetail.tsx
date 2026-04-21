@@ -43,6 +43,9 @@ interface LeadScore {
     tech_stack?: number;
     contact_availability?: number;
     size_fit?: number;
+    company_fit?: number;
+    buyer_signal_strength?: number;
+    accessibility?: number;
   };
   is_hot_lead: boolean;
   recommended_action: string;
@@ -89,20 +92,25 @@ interface LeadDetail {
   ai_notes?: string;
 }
 
-const BREAKDOWN_MAX: Record<string, number> = {
-  service_fit: 30,
-  intent_score: 25,
-  tech_stack: 20,
-  contact_availability: 15,
-  size_fit: 10,
-};
+const LEGACY_BREAKDOWN_ROWS = [
+  { key: "service_fit", label: "Service Fit", max: 30 },
+  { key: "intent_score", label: "Intent", max: 25 },
+  { key: "tech_stack", label: "Tech Stack", max: 20 },
+  { key: "contact_availability", label: "Contact", max: 15 },
+  { key: "size_fit", label: "Size Fit", max: 10 },
+];
 
-const BREAKDOWN_LABELS: Record<string, string> = {
-  service_fit: "Service Fit",
-  intent_score: "Intent",
-  tech_stack: "Tech Stack",
-  contact_availability: "Contact",
-  size_fit: "Size Fit",
+const MODERN_BREAKDOWN_ROWS = [
+  { key: "company_fit", label: "Company Fit", max: 40 },
+  { key: "buyer_signal_strength", label: "Buyer Signals", max: 40 },
+  { key: "accessibility", label: "Accessibility", max: 20 },
+];
+
+const getBreakdownRows = (breakdown?: LeadScore["breakdown"]) => {
+  const card = breakdown || {};
+  const hasModern = MODERN_BREAKDOWN_ROWS.some((row) => Object.prototype.hasOwnProperty.call(card, row.key));
+  if (hasModern) return MODERN_BREAKDOWN_ROWS;
+  return LEGACY_BREAKDOWN_ROWS;
 };
 
 const GRADE_STYLES: Record<string, string> = {
@@ -158,15 +166,17 @@ export default function LeadDetail() {
     if (lead?.score) return lead.score;
 
     const fallbackScore = Number((lead as any)?.raw_data?.final_score_100 || 0);
-    const grade = fallbackScore >= 70 ? "A" : fallbackScore >= 50 ? "B" : fallbackScore >= 30 ? "C" : "D";
+    const grade = fallbackScore >= 80 ? "A" : fallbackScore >= 60 ? "B" : fallbackScore >= 40 ? "C" : "D";
     return {
       total_score: fallbackScore,
       grade,
       breakdown: {},
-      is_hot_lead: fallbackScore >= 70,
-      recommended_action: fallbackScore >= 70 ? "contact_immediately" : fallbackScore >= 50 ? "add_to_sequence" : fallbackScore >= 30 ? "nurture" : "skip",
+      is_hot_lead: fallbackScore >= 80,
+      recommended_action: fallbackScore >= 80 ? "contact_immediately" : fallbackScore >= 60 ? "add_to_sequence" : fallbackScore >= 40 ? "nurture" : "skip",
     } as LeadScore;
   }, [lead]);
+
+  const breakdownRows = useMemo(() => getBreakdownRows(scoreCard?.breakdown), [scoreCard]);
 
   const handleGenerateColdEmail = async () => {
     if (!id) return;
@@ -311,14 +321,13 @@ export default function LeadDetail() {
                 <CardTitle className="text-base font-display">Score Breakdown</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                {Object.keys(BREAKDOWN_MAX).map((key) => {
-                  const max = BREAKDOWN_MAX[key];
+                {breakdownRows.map(({ key, label, max }) => {
                   const value = Number((scoreCard.breakdown as any)?.[key] || 0);
                   const width = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
                   return (
                     <div key={key}>
                       <div className="flex items-center justify-between text-xs mb-1">
-                        <span className="text-muted-foreground">{BREAKDOWN_LABELS[key]}</span>
+                        <span className="text-muted-foreground">{label}</span>
                         <span className="font-medium text-foreground">{value}/{max}</span>
                       </div>
                       <div className="h-2 rounded-full bg-muted overflow-hidden">

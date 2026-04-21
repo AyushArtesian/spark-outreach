@@ -37,6 +37,67 @@ NEARBY_LOCATION_HINTS = {
     "new delhi": ["delhi", "noida", "gurgaon", "gurugram", "faridabad"],
 }
 
+PRIORITY_BUYER_INDUSTRIES = {
+    "manufacturing",
+    "retail",
+    "healthcare",
+    "finance",
+    "logistics",
+    "real estate",
+    "hospitality",
+}
+
+DISQUALIFY_TYPES = [
+    "IT Services",
+    "Software Agency",
+    "Training Institute",
+    "Freelancer Platform",
+    "Job Portal",
+]
+
+DISQUALIFY_KEYWORDS = [
+    "naukri",
+    "indeed",
+    "upwork",
+    "thinknext",
+    "techcadd",
+    "coder roots",
+]
+
+DISQUALIFIED_COMPANY_PATTERNS = [
+    "it services",
+    "software agency",
+    "development agency",
+    "web design agency",
+    "digital marketing agency",
+    "training institute",
+    "academy",
+    "coaching",
+    "edtech training",
+    "freelancer platform",
+    "gig platform",
+    "staffing",
+    "recruitment agency",
+]
+
+DISQUALIFIED_DOMAIN_TOKENS = [
+    "naukri",
+    "indeed",
+    "upwork",
+    "fiverr",
+    "freelancer",
+    "timesjobs",
+    "monster",
+    "glassdoor",
+    "jobrapido",
+    "internshala",
+    "freshersworld",
+    "clutch",
+    "goodfirms",
+    "selectedfirms",
+    "techreviewer",
+]
+
 class LeadService:
     """Service for lead-related operations with MongoDB"""
 
@@ -161,6 +222,67 @@ class LeadService:
             f"{str(query or '').strip().lower()}"
         )
         return hashlib.md5(search_seed.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _detect_competitor_disqualification(
+        company_name: str,
+        candidate_type: str,
+        extra_text: str = "",
+        domain: str = "",
+        source_url: str = "",
+    ) -> Optional[str]:
+        """Return disqualification reason when lead matches hard competitor rules."""
+        normalized_name = str(company_name or "").strip().lower()
+        normalized_type = str(candidate_type or "").strip().lower()
+        normalized_domain = str(domain or "").strip().lower()
+        normalized_source_url = str(source_url or "").strip().lower()
+        searchable = (
+            f"{normalized_name} "
+            f"{str(extra_text or '').strip().lower()} "
+            f"{normalized_domain} "
+            f"{normalized_source_url}"
+        )
+        disqualify_type_keys = {item.lower() for item in DISQUALIFY_TYPES}
+
+        if normalized_type and (
+            normalized_type in disqualify_type_keys
+            or any(type_key in normalized_type for type_key in disqualify_type_keys)
+        ):
+            return f"type:{candidate_type}"
+
+        for type_key in disqualify_type_keys:
+            if type_key and type_key in searchable:
+                return f"type:{type_key}"
+
+        for key in DISQUALIFY_KEYWORDS:
+            if key in searchable:
+                return f"keyword:{key}"
+
+        for token in DISQUALIFIED_DOMAIN_TOKENS:
+            if token in normalized_domain or token in normalized_source_url:
+                return f"domain:{token}"
+
+        # Strong marketplace / job-portal phrase guard for generic titles.
+        hard_phrase_map = {
+            "Freelancer Platform": [
+                "hire freelancers",
+                "find freelance jobs",
+                "freelance marketplace",
+                "gig marketplace",
+            ],
+            "Job Portal": [
+                "job portal",
+                "jobs online",
+                "latest tech jobs",
+                "find jobs",
+            ],
+        }
+        for bucket, phrases in hard_phrase_map.items():
+            for phrase in phrases:
+                if phrase in searchable:
+                    return f"type:{bucket}"
+
+        return None
 
     @staticmethod
     def _ensure_negative_filters(query: str) -> str:
@@ -466,21 +588,21 @@ class LeadService:
 
     @staticmethod
     def _grade_from_total(total_score: int) -> str:
-        if total_score >= 70:
+        if total_score >= 80:
             return "A"
-        if total_score >= 50:
+        if total_score >= 60:
             return "B"
-        if total_score >= 30:
+        if total_score >= 40:
             return "C"
         return "D"
 
     @staticmethod
     def _recommended_action(total_score: int) -> str:
-        if total_score >= 70:
+        if total_score >= 80:
             return "contact_immediately"
-        if total_score >= 50:
+        if total_score >= 60:
             return "add_to_sequence"
-        if total_score >= 30:
+        if total_score >= 40:
             return "nurture"
         return "skip"
 
@@ -524,128 +646,165 @@ class LeadService:
     def _score_size_fit(employee_count: Optional[int]) -> int:
         if employee_count is None or employee_count <= 0:
             return 0
-        if 50 <= employee_count <= 200:
+        if 10 <= employee_count <= 500:
             return 10
-        if 20 <= employee_count < 50 or 200 < employee_count <= 500:
-            return 7
-        if 500 < employee_count <= 1000:
-            return 3
+        if 5 <= employee_count < 10:
+            return 4
         return 0
 
     @staticmethod
-    def _score_intent(
+    def _score_company_fit(
+        raw: Dict[str, Any],
+        enriched: Dict[str, Any],
+        lead_industry: Optional[str],
+        service_hints: List[str],
+    ) -> int:
+        company_signals = enriched.get("company_signals", {}) if isinstance(enriched, dict) else {}
+        searchable = " ".join([
+            str(raw.get("snippet", "")),
+            str(raw.get("company_summary", "")),
+            str(raw.get("title", "")),
+            str(lead_industry or ""),
+        ]).lower()
+
+        score = 0
+
+        # 1) SMB fit (10 points): sweet spot = 10-500 employees.
+        employee_count = LeadService._extract_employee_count(raw)
+        if employee_count is not None and 10 <= employee_count <= 500:
+            score += 10
+
+        # 2) Industry fit (10 points): prioritize non-tech buyers.
+        industry_text = str(lead_industry or raw.get("industry") or "").strip().lower()
+        if not industry_text:
+            industry_text = searchable
+        if any(ind in industry_text for ind in PRIORITY_BUYER_INDUSTRIES):
+            score += 10
+
+        # 3) Existing tech stack (10 points): indicates budget and capability to buy services.
+        tech_stack = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
+        has_tech_stack = bool(
+            (tech_stack.get("technologies") or [])
+            or str(tech_stack.get("cms") or "").strip()
+            or str(tech_stack.get("ecommerce_platform") or "").strip()
+            or bool(tech_stack.get("uses_microsoft_stack"))
+        )
+        if has_tech_stack:
+            score += 10
+
+        # 4) Company age fit (10 points): ideal = 2-15 years.
+        current_year = datetime.utcnow().year
+        founded_year_candidates = [
+            raw.get("founded_year"),
+            raw.get("company_founded_year"),
+            company_signals.get("founded_year"),
+            company_signals.get("year_founded"),
+        ]
+        age = None
+        for value in founded_year_candidates:
+            try:
+                year = int(str(value).strip())
+                if 1900 <= year <= current_year:
+                    age = current_year - year
+                    break
+            except Exception:
+                continue
+
+        if age is not None and 2 <= age <= 15:
+            score += 10
+
+        return min(40, max(0, score))
+
+    @staticmethod
+    def _score_buyer_signals(
         raw: Dict[str, Any],
         enriched: Dict[str, Any],
         service_hints: List[str],
     ) -> int:
-        source = str(raw.get("source", "")).strip().lower()
-        intent_signal = str(raw.get("intent_signal", "")).strip().lower()
-        if intent_signal == "hiring" or source.startswith("job_board"):
-            return 25
-
+        tech = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
         company_signals = enriched.get("company_signals", {}) if isinstance(enriched, dict) else {}
+        decision = enriched.get("decision_maker", {}) if isinstance(enriched, dict) else {}
+
         searchable = " ".join(
             [
+                str(raw.get("job_title", "")),
                 str(raw.get("snippet", "")),
                 str(raw.get("company_summary", "")),
                 str(raw.get("title", "")),
-                str(company_signals.get("news_snippets", "")),
+                str(company_signals),
             ]
         ).lower()
 
-        service_tokens = []
-        for service in service_hints:
-            service_tokens.extend([token for token in re.split(r"\W+", str(service).lower()) if len(token) >= 3])
-        has_service_mention = any(token in searchable for token in set(service_tokens)) if service_tokens else True
+        score = 0
 
-        has_rfq = any(
-            phrase in searchable
-            for phrase in ["request a demo", "get a quote", "rfq", "contact us", "request for proposal"]
-        )
-        if has_rfq and has_service_mention:
-            return 15
+        # +15: Hiring IT/digital roles.
+        it_budget_roles = [
+            "it manager",
+            "cto",
+            "chief technology",
+            "digital transformation lead",
+            "erp manager",
+            "technology manager",
+            "head of it",
+        ]
+        if any(role in searchable for role in it_budget_roles):
+            score += 15
 
-        if bool(company_signals.get("recent_funding")):
-            return 10
+        # +15: Outdated/basic website signal.
+        outdated_markers = [
+            "legacy",
+            "outdated",
+            "under construction",
+            "basic website",
+            "old website",
+            "not mobile friendly",
+        ]
+        cms = str(tech.get("cms") or "").strip().lower()
+        if any(marker in searchable for marker in outdated_markers) or cms in {"joomla", "drupal", "wordpress"}:
+            score += 15
 
-        if bool(company_signals.get("digital_transformation")) or "digital transformation" in searchable:
-            return 5
+        # +10: Poor digital presence/no mobile app.
+        poor_presence_markers = [
+            "no mobile app",
+            "no app",
+            "basic digital presence",
+            "manual process",
+            "offline process",
+        ]
+        if any(marker in searchable for marker in poor_presence_markers):
+            score += 10
 
-        return 0
+        # +10: Digital transformation / ERP signal.
+        if any(token in searchable for token in ["digital transformation", "erp", "microsoft dynamics", "process automation"]):
+            score += 10
 
-    @staticmethod
-    def _score_tech_stack(
-        enriched: Dict[str, Any],
-        service_hints: List[str],
-    ) -> int:
-        tech = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
-        technologies = [str(t).strip().lower() for t in (tech.get("technologies") or []) if str(t).strip()]
-        cms = str(tech.get("cms", "")).strip().lower()
-        ecommerce_platform = str(tech.get("ecommerce_platform", "")).strip()
-        uses_microsoft_stack = bool(tech.get("uses_microsoft_stack", False))
-        tech_confidence = float(tech.get("tech_confidence", 0.0) or 0.0)
-        fallback_text = " ".join(
-            [
-                " ".join([str(t).strip().lower() for t in (tech.get("technologies") or []) if str(t).strip()]),
-                str(tech.get("cms", "")).strip().lower(),
-                str(tech.get("ecommerce_platform", "")).strip().lower(),
-            ]
-        ).strip()
+        # +5: Business development / sales hiring signal.
+        if any(token in searchable for token in ["business development", "sales manager", "account executive", "growth manager"]):
+            score += 5
 
-        service_text = " ".join([str(s).strip().lower() for s in service_hints if str(s).strip()])
-        power_apps_focus = any(token in service_text for token in ["power apps", "power platform", "power automate", "dynamics"])
-        ecommerce_focus = any(token in service_text for token in ["ecommerce", "e-commerce", "shopify", "woocommerce", "magento"])
+        # Slight assist when decision maker title indicates digital ownership.
+        decision_title = str(decision.get("title") or "").lower()
+        if any(t in decision_title for t in ["director", "manager", "cto", "cio"]):
+            score += 3
 
-        if power_apps_focus and uses_microsoft_stack:
-            return 20
-        if ecommerce_focus and ecommerce_platform:
-            return 20
-
-        service_tokens = [token for token in re.split(r"\W+", service_text) if len(token) >= 3]
-        tech_tokens = set(technologies)
-        if cms:
-            tech_tokens.add(cms)
-        if ecommerce_platform:
-            tech_tokens.add(ecommerce_platform.lower())
-
-        overlap_hits = 0
-        for token in set(service_tokens):
-            if any(token in candidate for candidate in tech_tokens):
-                overlap_hits += 1
-            elif token in fallback_text:
-                overlap_hits += 1
-
-        if overlap_hits >= 2:
-            return 20 if tech_confidence >= 0.35 else 15
-        if overlap_hits == 1 or uses_microsoft_stack or bool(ecommerce_platform):
-            if tech_confidence >= 0.25:
-                return 10
-            return 6
-        if tech_confidence >= 0.60 and len(tech_tokens) >= 3:
-            return 6
-        if tech_confidence >= 0.40 and len(tech_tokens) >= 2:
-            return 4
-        if tech_confidence >= 0.25 and len(tech_tokens) >= 1:
-            return 2
-        return 0
+        return min(40, max(0, score))
 
     @staticmethod
-    def _score_contact_availability(raw: Dict[str, Any], enriched: Dict[str, Any]) -> int:
+    def _score_accessibility(raw: Dict[str, Any], enriched: Dict[str, Any]) -> int:
         decision = enriched.get("decision_maker", {}) if isinstance(enriched, dict) else {}
         tech = enriched.get("tech_stack", {}) if isinstance(enriched, dict) else {}
 
-        name = str(decision.get("name", "")).strip()
         title = str(decision.get("title", "")).strip()
+        linkedin_url = str(decision.get("linkedin_url", "")).strip() or str(raw.get("apollo_linkedin_url", "")).strip()
         email = str(decision.get("email", "")).strip() or str(raw.get("company_email", "")).strip()
         has_contact_form = bool(decision.get("has_contact_form", False) or tech.get("has_contact_form", False))
 
-        if name and email and (title or name):
-            return 15
-        if email:
-            return 8
-        if has_contact_form:
-            return 4
-        return 0
+        score = 0
+        if linkedin_url or any(token in title.lower() for token in ["manager", "director", "cto", "ceo", "cio"]):
+            score += 10
+        if email or has_contact_form:
+            score += 10
+        return min(20, max(0, score))
 
     async def calculate_lead_score(
         self,
@@ -660,7 +819,7 @@ class LeadService:
         if not service_candidates and company_profile and company_profile.services:
             service_candidates = self._as_service_list(company_profile.services)
 
-        # 1) Service fit (0-30) based on existing embedding infrastructure.
+        # 1) Company fit (0-40)
         similarity = float(lead.company_fit_score or 0.0)
         if company_profile and company_profile.company_embeddings and lead.lead_embedding:
             try:
@@ -675,35 +834,27 @@ class LeadService:
                 print(f"[LEAD SCORE] Similarity calculation failed for {lead.company}: {e}")
 
         similarity = max(0.0, min(1.0, similarity))
-        service_fit_score = self._clamp_int(similarity * 30.0, 0, 30)
+        company_fit_score = self._score_company_fit(
+            raw=raw,
+            enriched=enriched,
+            lead_industry=lead.industry,
+            service_hints=service_candidates,
+        )
+        if company_fit_score < 40 and similarity >= 0.72:
+            company_fit_score = min(40, company_fit_score + 5)
 
-        # 2) Intent score (0-25).
-        intent_score = self._clamp_int(
-            self._score_intent(raw=raw, enriched=enriched, service_hints=service_candidates),
-            0,
-            25,
+        # 2) Buyer signal strength (0-40)
+        buyer_signal_score = self._score_buyer_signals(
+            raw=raw,
+            enriched=enriched,
+            service_hints=service_candidates,
         )
 
-        # 3) Tech stack match (0-20).
-        tech_stack_score = self._clamp_int(
-            self._score_tech_stack(enriched=enriched, service_hints=service_candidates),
-            0,
-            20,
-        )
-
-        # 4) Contact availability (0-15).
-        contact_score = self._clamp_int(
-            self._score_contact_availability(raw=raw, enriched=enriched),
-            0,
-            15,
-        )
-
-        # 5) Company size fit (0-10).
-        employee_count = self._extract_employee_count(raw)
-        size_fit_score = self._clamp_int(self._score_size_fit(employee_count), 0, 10)
+        # 3) Accessibility (0-20)
+        accessibility_score = self._score_accessibility(raw=raw, enriched=enriched)
 
         total_score = self._clamp_int(
-            service_fit_score + intent_score + tech_stack_score + contact_score + size_fit_score,
+            company_fit_score + buyer_signal_score + accessibility_score,
             0,
             100,
         )
@@ -714,13 +865,11 @@ class LeadService:
             "total_score": total_score,
             "grade": grade,
             "breakdown": {
-                "service_fit": service_fit_score,
-                "intent_score": intent_score,
-                "tech_stack": tech_stack_score,
-                "contact_availability": contact_score,
-                "size_fit": size_fit_score,
+                "company_fit": company_fit_score,
+                "buyer_signal_strength": buyer_signal_score,
+                "accessibility": accessibility_score,
             },
-            "is_hot_lead": total_score >= 70,
+            "is_hot_lead": total_score >= 80,
             "recommended_action": recommended_action,
         }
     
@@ -1190,6 +1339,7 @@ class LeadService:
         skipped_low_quality = 0
         skipped_no_signal = 0
         skipped_location_mismatch = 0
+        skipped_competitor = 0
         
         def _is_service_provider_or_wrong_type(company_name: str, snippet: str) -> bool:
             """Filter out service providers, job boards, and other non-buyers"""
@@ -1338,6 +1488,26 @@ class LeadService:
 
             summary_text = (snapshot.get("summary") or "").lower()
             combined_quality_text = f"{company_name.lower()} {snippet} {summary_text}"
+            candidate_type = str(
+                item.get("company_type")
+                or item.get("type")
+                or item.get("industry")
+                or ""
+            ).strip()
+            competitor_reason = self._detect_competitor_disqualification(
+                company_name=company_name,
+                candidate_type=candidate_type,
+                extra_text=combined_quality_text,
+                domain=domain,
+                source_url=str(item.get("url") or item.get("company_website") or ""),
+            )
+            if competitor_reason:
+                skipped_competitor += 1
+                print(
+                    f"[LEAD DISCOVERY] skipped_competitor company='{company_name}' "
+                    f"reason={competitor_reason}"
+                )
+                continue
             
             # Filter out service providers, job boards, and non-buyer companies
             if _is_service_provider_or_wrong_type(company_name, snippet):
@@ -1616,7 +1786,8 @@ class LeadService:
             f"Lead discovery summary: owner={owner_id} created={created_count} "
             f"skipped_duplicate={skipped_duplicate} skipped_empty_domain={skipped_empty_domain} "
             f"skipped_location_mismatch={skipped_location_mismatch} "
-            f"skipped_low_quality={skipped_low_quality} skipped_no_signal={skipped_no_signal}"
+            f"skipped_low_quality={skipped_low_quality} skipped_no_signal={skipped_no_signal} "
+            f"skipped_competitor={skipped_competitor}"
         )
         return created_count
 
@@ -2089,6 +2260,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         skipped_low_relevance = 0
         collapsed_duplicates = 0
         rescued_relaxed_constraints = 0
+        skipped_competitor = 0
 
         apollo_only_mode = bool((filters or {}).get("apollo_only"))
         source_mode = str((filters or {}).get("source_mode") or "").strip().lower()
@@ -2160,6 +2332,38 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
 
             lead_raw = lead.raw_data or {}
             source_name = str(lead_raw.get("source", "")).strip().lower()
+            lead_type = str(
+                lead_raw.get("company_type")
+                or lead_raw.get("type")
+                or lead.industry
+                or ""
+            ).strip()
+            competitor_text = " ".join(
+                [
+                    str(lead_raw.get("snippet", "")),
+                    str(lead_raw.get("title", "")),
+                    str(lead_raw.get("company_summary", "")),
+                    str(lead_raw.get("source_url", "")),
+                ]
+            )
+            competitor_reason = self._detect_competitor_disqualification(
+                company_name=lead.company or "",
+                candidate_type=lead_type,
+                extra_text=competitor_text,
+                domain=self._canonical_domain(str(lead_raw.get("source_url", ""))),
+                source_url=str(lead_raw.get("source_url", "")),
+            )
+            if competitor_reason:
+                skipped_competitor += 1
+                lead.raw_data = lead.raw_data or {}
+                lead.raw_data["skip_reason"] = "skipped_competitor"
+                lead.raw_data["skip_detail"] = competitor_reason
+                lead.save()
+                print(
+                    f"[LEAD SCORING] skipped_competitor company='{lead.company or 'unknown'}' "
+                    f"reason={competitor_reason}"
+                )
+                continue
 
             if apollo_only_mode and not source_name.startswith("apollo"):
                 skipped_constraints += 1
@@ -2296,6 +2500,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
               f"total_candidates={all_leads.count()} "
               f"skipped_constraints={skipped_constraints} "
               f"rescued_relaxed={rescued_relaxed_constraints} "
+              f"skipped_competitor={skipped_competitor} "
               f"skipped_no_signals={skipped_no_signals} "
               f"skipped_low_relevance={skipped_low_relevance} "
               f"skipped_low_score={skipped_low_score} "

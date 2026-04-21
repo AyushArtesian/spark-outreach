@@ -302,6 +302,25 @@ Message:
         }
 
         location_hint = str(active_filters.get("location") or "").strip()
+        if not location_hint:
+            hinted_locations = [str(loc).strip() for loc in (profile_brief.get("target_locations") or []) if str(loc).strip()]
+            if hinted_locations:
+                location_hint = hinted_locations[0]
+
+        normalized_location_hint = re.sub(r"\s+", " ", location_hint.strip().lower())
+        location_tokens = [tok for tok in re.split(r"\W+", normalized_location_hint) if len(tok) >= 3]
+
+        other_city_tokens = {
+            "toronto", "vancouver", "montreal", "london", "newyork", "singapore", "francisco",
+            "sydney", "melbourne", "dubai",
+            "bengaluru", "bangalore", "mumbai", "pune", "hyderabad", "delhi", "gurgaon",
+            "gurugram", "chennai", "kolkata", "noida", "ahmedabad", "jaipur", "lucknow",
+        }
+        if location_tokens:
+            for token in location_tokens:
+                if token in other_city_tokens:
+                    other_city_tokens.discard(token)
+
         current_date = datetime.utcnow().strftime("%Y-%m-%d")
         current_year = datetime.utcnow().year
 
@@ -376,7 +395,7 @@ Message:
             return candidates
 
         def _looks_live_market_query(candidate: str) -> bool:
-            """Accept only executable, real-time intent queries and reject meta/instruction text."""
+            """Accept only executable, buyer-intent, location-fenced market queries."""
             cleaned = _normalize_candidate(candidate)
             lowered = cleaned.lower()
 
@@ -401,9 +420,28 @@ Message:
             if any(fragment in lowered for fragment in blocked_fragments):
                 return False
 
+            seller_disallowed = [
+                "software development company",
+                "web development company",
+                "top app development",
+                "best web development",
+                "hire dedicated developers",
+                "outsourcing company",
+                "training institute",
+                "course",
+                "freelancer",
+            ]
+            if any(fragment in lowered for fragment in seller_disallowed):
+                return False
+
+            if location_tokens and not any(token in lowered for token in location_tokens):
+                return False
+
+            if any(f" {token} " in f" {lowered} " for token in other_city_tokens):
+                return False
+
             # Require at least one live buying/market trigger.
             live_triggers = [
-                "hiring",
                 "funded",
                 "series",
                 "rfp",
@@ -415,6 +453,14 @@ Message:
                 "partner",
                 "expansion",
                 "growth",
+                "looking for",
+                "seeking",
+                "vendor",
+                "digital transformation",
+                "it manager",
+                "cto",
+                "manufacturing companies",
+                "retail companies",
                 str(current_year),
                 "this year",
                 "now",
@@ -449,7 +495,11 @@ Message:
         system_prompt = (
             "You are a B2B lead generation specialist. Generate Google search queries ONLY. "
             "Output valid JSON immediately. Do NOT use thinking tags, reasoning, or explanations. "
-            "Every response MUST be valid JSON starting with { and ending with }."
+            "Every response MUST be valid JSON starting with { and ending with }. "
+            f"CRITICAL: ALL queries MUST target this location: {location_hint or target_locations_str}. "
+            "NEVER generate queries for other cities or countries. "
+            "NEVER generate queries that would find vendors/agencies selling services. "
+            "ONLY generate queries that find COMPANIES WHO WANT TO BUY services."
         )
 
         # Build company context for LLM
@@ -475,24 +525,28 @@ RETRIEVED_COMPANY_CONTEXT:
 """
 
         user_prompt = (
-            f"Generate {limit} DIFFERENT Google search queries to find companies in {target_locations_str} "
-            f"needing {services_str or 'these services'}.\n\n"
-            f"Generate MANY varied queries with different angles:\n"
-            f"- Companies seeking {services_str or 'these services'}\n"
-            f"- RFP/vendor searches\n"
-            f"- Digital transformation initiatives\n"
-            f"- Expansion/growth signals\n"
-            f"- Funded companies in {target_industries_str}\n\n"
-            f"Location: {location_hint or target_locations_str}\n"
-            f"Industries: {target_industries_str}\n"
-            f"Services: {services_str}\n\n"
+            f"Generate {limit} DIFFERENT Google search queries to find COMPANIES THAT BUY {services_str or 'these services'}.\n\n"
+            f"Target location (strict): {location_hint or target_locations_str}\n"
+            f"Target industries: {target_industries_str}\n"
+            f"Services sold: {services_str or 'custom software services'}\n"
+            f"Current date: {current_date}\n\n"
+            "Create both query types:\n"
+            "Type A - Buyer Intent signals:\n"
+            "- companies needing implementation/vendor partner\n"
+            "- RFP/procurement/request-for-proposal signals\n"
+            "- digital transformation and ERP modernization initiatives\n"
+            "Type B - Company Discovery:\n"
+            "- industry company lists in target location\n"
+            "- funded/growth-stage startups in target location\n"
+            "- LinkedIn company footprint with IT/CTO titles in target location\n\n"
             "Rules:\n"
-            "- 8-14 words per query\n"
-            "- MUST include location or industry keywords\n"
-            "- Include varied buying signals: implementing, seeking partner, RFP, hiring, funded, expansion\n"
-            "- Minimize quotes - use sparingly for exact phrases only\n"
-            "- Each query should find BUYERS of these services, not sellers\n"
-            "- Generate at least 8 completely different queries\n\n"
+            "- 7-13 words per query\n"
+            "- MUST include the target location in EVERY query\n"
+            "- MUST NOT include any other city/country\n"
+            "- MUST find BUYERS, not service vendors/agencies\n"
+            "- Avoid training institute, freelancer platform, and job portal intent\n"
+            "- Use realistic Google syntax and minimal quotes\n"
+            "- Generate at least 8 materially different queries\n\n"
             "Return ONLY valid JSON with no explanations:\n"
             "{\"queries\":[\"query_1\",\"query_2\",\"query_3\",\"query_4\",\"query_5\",\"query_6\",\"query_7\",\"query_8\",\"query_9\",\"query_10\"]}"
         )
@@ -642,8 +696,10 @@ RETRIEVED_COMPANY_CONTEXT:
                 )
                 refinement_prompt = (
                     f"Rewrite these queries to strict JSON for location {location_hint or active_filters.get('location') or ''}.\n"
+                    "CRITICAL: Every query MUST contain ONLY this location and no other city/country.\n"
                     "Rules: 8-13 words, include location in each query, different buying situations across the set.\n"
                     "Avoid repetitive templates. Keep quote usage minimal and realistic.\n"
+                    "Do not generate vendor/agency finder queries; generate buyer-company finder queries only.\n"
                     f"Industry: {active_filters.get('industry', 'all')}; "
                     f"services: {json.dumps(profile_brief.get('services', [])[:3], ensure_ascii=True)}; "
                     f"tech: {json.dumps(profile_brief.get('technologies', [])[:3], ensure_ascii=True)}.\n"

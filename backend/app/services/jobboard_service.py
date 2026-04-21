@@ -12,7 +12,6 @@ import aiohttp
 from bs4 import BeautifulSoup  # type: ignore[import-not-found]
 
 from app.config import settings
-from app.services.service_catalog import build_job_keywords
 
 
 USER_AGENTS = [
@@ -23,7 +22,7 @@ USER_AGENTS = [
 
 
 class JobBoardService:
-    """Discover high-intent buyer companies via active hiring signals."""
+    """Discover high-intent buyer companies via web intent signals."""
 
     def __init__(self) -> None:
         self.request_timeout = aiohttp.ClientTimeout(total=18)
@@ -93,26 +92,38 @@ class JobBoardService:
                 await asyncio.sleep(0.8 * (attempt + 1))
         return ""
 
-    def _buyer_intent_keywords(self, service: str) -> List[str]:
-        """Generate search keywords to find BUYERS of this service (not job postings)"""
+    def _buyer_intent_keywords(self, service: str, location: str) -> List[str]:
+        """Generate buyer-side discovery keywords (not role-hiring keywords)."""
         normalized_service = self._clean_text(service)
+        normalized_location = self._clean_text(location).lower() or "india"
         if not normalized_service:
             return []
 
+        service_lower = normalized_service.lower()
+        service_category = normalized_service
+        if "dynamics" in service_lower or "erp" in service_lower:
+            service_category = "ERP implementation"
+        elif "web" in service_lower or "website" in service_lower:
+            service_category = "web development"
+
         keywords: List[str] = [
-            normalized_service,
-            f"{normalized_service} implementation partner",
-            f"looking for {normalized_service}",
-            f"{normalized_service} vendor",
-            f"{normalized_service} consulting",
-            f"hire {normalized_service} firm",
+            f"companies in {normalized_location} need {service_category}",
+            f"{normalized_location} startups looking for {service_category} partner",
+            f"{service_category} vendor selection {normalized_location}",
+            f"{service_category} request for proposal {normalized_location}",
+            f"site:linkedin.com/company {normalized_location} cto it manager",
+            f"top manufacturing companies in {normalized_location}",
+            f"funded startups {normalized_location}",
         ]
 
-        # Add a few deterministic job-derived variants to improve board hit rates.
-        for item in build_job_keywords(normalized_service, max_keywords=4):
-            cleaned = self._clean_text(item)
-            if cleaned:
-                keywords.append(cleaned)
+        if "dynamics" in service_lower or "erp" in service_lower:
+            keywords.extend(
+                [
+                    f"{normalized_location} companies using SAP OR Oracle ERP",
+                    f"{normalized_location} ERP modernization projects",
+                    f"{normalized_location} manufacturing company IT requirements",
+                ]
+            )
 
         deduped: List[str] = []
         seen = set()
@@ -173,11 +184,8 @@ class JobBoardService:
             "reddit.",
             "pinterest.",
             "justdial.",
-            "indiamart.",
             "sulekha.",
-            "clutch.",
             "g2.",
-            "goodfirms.",
             "businessofapps.",
             "topdevelopers.",
             "mobileappdaily.",
@@ -688,13 +696,32 @@ class JobBoardService:
         if not key:
             return []
 
+        lowered_service = service.lower()
+        service_category = service
+        if "dynamics" in lowered_service or "erp" in lowered_service:
+            service_category = "ERP implementation"
+        elif "web" in lowered_service or "website" in lowered_service:
+            service_category = "web development"
+
         queries = [
-            f'"{service}" ("RFP" OR "request for proposal" OR "RFQ" OR "invites bids") "{location}"',
-            f'"{service}" ("tender notice" OR "bid submission" OR "issued by") "{location}"',
-            f'"{service}" ("looking for vendor" OR "seeking development partner" OR "outsourcing partner") "{location}"',
-            f'"{service}" ("website redesign project" OR "platform revamp" OR "digital transformation project") "{location}"',
-            f'"{service}" ("seeking proposals" OR "vendor selection" OR "request for quotation") "{location}"',
+            f'companies in {location} need {service_category}',
+            f'{location} startups looking for {service_category} partner',
+            f'{service_category} vendor selection {location}',
+            f'{service_category} request for proposal {location}',
+            f'{location} digital transformation projects {service_category}',
+            f'top manufacturing companies in {location}',
+            f'funded startups {location}',
+            f'site:linkedin.com/company {location} cto it manager',
         ]
+
+        if "dynamics" in lowered_service or "erp" in lowered_service:
+            queries.extend(
+                [
+                    f'{location} companies using SAP OR Oracle ERP',
+                    f'{location} manufacturing company IT requirements ERP',
+                    f'{location} ERP implementation partner requirement',
+                ]
+            )
 
         results: List[Dict[str, Any]] = []
         headers = {
@@ -900,6 +927,9 @@ class JobBoardService:
         serper_results = await self._discover_buyer_intent_with_serper(service, location)
         if serper_results:
             return serper_results
+        growth_results = await self._discover_growth_buyer_intent_with_serper(service, location)
+        if growth_results:
+            return growth_results
         return await self._discover_buyer_intent_with_duckduckgo(service, location)
 
     def _parse_indeed_html(self, html: str, keyword: str, location: str) -> List[Dict[str, Any]]:
@@ -1197,7 +1227,13 @@ class JobBoardService:
             print(f"[JOBBOARD] Skipping scrape: empty service or location")
             return []
 
-        keywords = self._buyer_intent_keywords(service)
+        enable_indeed = bool(settings.JOBBOARD_ENABLE_INDEED)
+        enable_naukri = bool(settings.JOBBOARD_ENABLE_NAUKRI)
+        if not enable_indeed and not enable_naukri:
+            print("[JOBBOARD] Indeed/Naukri scraping disabled by config.")
+            return []
+
+        keywords = self._buyer_intent_keywords(service, location)
         print(f"[JOBBOARD] Generated keywords for '{service}': {keywords}")
         if not keywords:
             print(f"[JOBBOARD] No keywords generated for service '{service}'")
@@ -1208,12 +1244,15 @@ class JobBoardService:
 
         async with aiohttp.ClientSession() as session:
             for keyword in keywords:
-                print(f"[JOBBOARD] Scraping Indeed for keyword '{keyword}' in '{location}'")
-                try:
-                    indeed_jobs = await self._scrape_indeed(session, keyword, location)
-                    print(f"[JOBBOARD] Indeed found {len(indeed_jobs)} jobs for '{keyword}'")
-                except Exception as exc:
-                    print(f"[JOBBOARD] Indeed scrape FAILED for '{keyword}' in '{location}': {exc}")
+                if enable_indeed:
+                    print(f"[JOBBOARD] Scraping Indeed for keyword '{keyword}' in '{location}'")
+                    try:
+                        indeed_jobs = await self._scrape_indeed(session, keyword, location)
+                        print(f"[JOBBOARD] Indeed found {len(indeed_jobs)} jobs for '{keyword}'")
+                    except Exception as exc:
+                        print(f"[JOBBOARD] Indeed scrape FAILED for '{keyword}' in '{location}': {exc}")
+                        indeed_jobs = []
+                else:
                     indeed_jobs = []
 
                 for item in indeed_jobs:
@@ -1227,12 +1266,15 @@ class JobBoardService:
                     seen.add(key)
                     jobs.append(item)
 
-                print(f"[JOBBOARD] Scraping Naukri for keyword '{keyword}' in '{location}'")
-                try:
-                    naukri_jobs = await self._scrape_naukri(session, keyword, location)
-                    print(f"[JOBBOARD] Naukri found {len(naukri_jobs)} jobs for '{keyword}'")
-                except Exception as exc:
-                    print(f"[JOBBOARD] Naukri scrape FAILED for '{keyword}' in '{location}': {exc}")
+                if enable_naukri:
+                    print(f"[JOBBOARD] Scraping Naukri for keyword '{keyword}' in '{location}'")
+                    try:
+                        naukri_jobs = await self._scrape_naukri(session, keyword, location)
+                        print(f"[JOBBOARD] Naukri found {len(naukri_jobs)} jobs for '{keyword}'")
+                    except Exception as exc:
+                        print(f"[JOBBOARD] Naukri scrape FAILED for '{keyword}' in '{location}': {exc}")
+                        naukri_jobs = []
+                else:
                     naukri_jobs = []
 
                 for item in naukri_jobs:
@@ -1325,19 +1367,21 @@ class JobBoardService:
 
         for service in service_values:
             for location in location_values:
-                try:
-                    board_jobs = await self.scrape_job_postings(service=service, location=location)
-                    print(f"[JOBBOARD] Live job-board results for '{service}' in '{location}': {len(board_jobs)}")
-                    all_jobs.extend(board_jobs)
-                except Exception as exc:
-                    print(f"[JOBBOARD] Job-board discovery failed for '{service}' in '{location}': {exc}")
+                if bool(settings.JOBBOARD_ENABLE_INDEED) or bool(settings.JOBBOARD_ENABLE_NAUKRI):
+                    try:
+                        board_jobs = await self.scrape_job_postings(service=service, location=location)
+                        print(f"[JOBBOARD] Live job-board results for '{service}' in '{location}': {len(board_jobs)}")
+                        all_jobs.extend(board_jobs)
+                    except Exception as exc:
+                        print(f"[JOBBOARD] Job-board discovery failed for '{service}' in '{location}': {exc}")
 
-                try:
-                    web_jobs = await self.discover_buyer_intent(service=service, location=location)
-                    print(f"[JOBBOARD] Live web buyer-intent results for '{service}' in '{location}': {len(web_jobs)}")
-                    all_jobs.extend(web_jobs)
-                except Exception as exc:
-                    print(f"[JOBBOARD] Web intent discovery failed for '{service}' in '{location}': {exc}")
+                if bool(settings.JOBBOARD_ENABLE_WEB_INTENT):
+                    try:
+                        web_jobs = await self.discover_buyer_intent(service=service, location=location)
+                        print(f"[JOBBOARD] Live web buyer-intent results for '{service}' in '{location}': {len(web_jobs)}")
+                        all_jobs.extend(web_jobs)
+                    except Exception as exc:
+                        print(f"[JOBBOARD] Web intent discovery failed for '{service}' in '{location}': {exc}")
 
         print(f"[JOBBOARD] Total jobs from all sources: {len(all_jobs)}")
 

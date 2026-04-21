@@ -1,7 +1,8 @@
-"""
-Deterministic high-intent query generation for lead discovery fallback
-"""
+"""Deterministic buyer-intent query generation for lead discovery fallback."""
+
+from datetime import datetime
 from typing import Optional, List, Dict, Any
+
 from app.utils.json_utils import sanitize_queries
 
 
@@ -12,6 +13,29 @@ LOCATION_ALIASES = {
     "bengalure": "bangalore",
     "new delhi": "delhi",
 }
+
+PRIORITY_BUYER_INDUSTRIES = [
+    "manufacturing",
+    "retail",
+    "healthcare",
+    "finance",
+    "logistics",
+    "real estate",
+    "hospitality",
+]
+
+
+def _service_category(service: str) -> str:
+    text = (service or "").strip().lower()
+    if not text:
+        return "digital services"
+    if "dynamics" in text or "erp" in text or "power" in text:
+        return "ERP implementation"
+    if "web" in text or "website" in text:
+        return "web development"
+    if "mobile" in text:
+        return "mobile app development"
+    return service
 
 
 def _normalize_location_text(value: Optional[str]) -> str:
@@ -31,8 +55,11 @@ def build_high_intent_fallback_queries(
     max_queries: int,
 ) -> List[str]:
     """
-    Create deterministic buyer-intent queries to find companies SEEKING our services.
-    Generates prospect-finding queries: companies looking for partners/vendors for these services.
+    Create deterministic buyer-intent queries to find COMPANIES WHO BUY services.
+
+    Query families:
+    - Type A: buyer-intent web queries (companies looking for vendors/partners)
+    - Type B: company-discovery queries (target accounts likely to buy)
     """
     filters = filters or {}
     profile = company_profile or {}
@@ -44,80 +71,61 @@ def build_high_intent_fallback_queries(
             location = str(target_locs[0]).strip()
     location = _normalize_location_text(location) or location or "india"
 
-    # Get target industries and services from profile
-    target_industries = [
-        str(ind).strip().lower() 
-        for ind in (profile.get("target_industries") or [])
-        if str(ind).strip()
-    ]
+    industry_hint = str(filters.get("industry") or "").strip().lower()
+    target_industries = [str(ind).strip().lower() for ind in (profile.get("target_industries") or []) if str(ind).strip()]
+    if industry_hint and industry_hint != "all":
+        target_industries.insert(0, industry_hint)
+    target_industries = [ind for ind in target_industries if ind and ind != "software"]
     if not target_industries:
-        target_industries = ["software", "technology"]
+        target_industries = PRIORITY_BUYER_INDUSTRIES[:3]
 
     services = filters.get("services") or profile.get("services") or []
     top_services = [str(s).strip() for s in services[:3] if str(s).strip()]
     if not top_services:
-        top_services = ["development"]
+        top_services = ["web development"]
 
-    technologies = [str(t).strip() for t in (profile.get("technologies") or []) if str(t).strip()]
+    current_year = datetime.utcnow().year
+    generated: List[str] = []
 
-    # Build service keywords for queries
-    service_short = " ".join(top_services[0].split()[:2]) if top_services else "development"
-    
-    generated = []
-
-    # CRITICAL CHANGE: Generate queries that find BUYERS of services
-    # Focus on: "seeking partner", "RFP", "looking for vendor", "implementation partner"
-    
-    # Pattern 1: Companies seeking implementation partners
+    # Type A: Buyer-intent queries (procurement/need/vendor-search behavior).
     for service in top_services[:2]:
-        generated.append(f'{service} "implementation partner" {location}')
-        generated.append(f'looking for {service} company "{location}"')
-        generated.append(f'{service} "vendor selection" OR "partner" {location}')
-    
-    # Pattern 2: RFP and procurement signals
-    for service in top_services[:2]:
-        generated.append(f'{service} "RFP" OR "request for proposal" {location}')
-        generated.append(f'{service} consulting "contact us" {location}')
-        generated.append(f'hire {service} company OR consultant {location}')
-    
-    # Pattern 3: Digital transformation (companies buying services for modernization)
-    for industry in target_industries[:2]:
-        generated.append(f'{industry} "digital transformation" {service_short} {location}')
-        generated.append(f'{industry} modernization {service_short} services {location}')
-    
-    # Pattern 4: Service providers/agencies in target location
-    for industry in target_industries[:2]:
-        generated.append(f'{industry} {service_short} "agency" OR "firm" {location}')
-        generated.append(f'{industry} {service_short} services {location} company')
-    
-    # Pattern 5: High-growth companies (likely to buy services)
-    generated.append(f'high growth {target_industries[0]} startups {location} {service_short}')
-    generated.append(f'VC backed {target_industries[0]} {location} hiring tech roles')
-    
-    # Pattern 6: Companies with recent funding (likely buyers)
-    for industry in target_industries[:1]:
-        generated.append(f'{industry} "series A" OR "series B" {location} company')
-        generated.append(f'{industry} raised funding {location} expansion')
-    
-    # Pattern 7: Expansion signals (companies scaling = need vendors)
-    generated.append(f'{target_industries[0]} companies expanding {location} {service_short}')
-    generated.append(f'{target_industries[0]} growth stage {service_short} initiatives {location}')
-    
-    # Pattern 8: Direct service request patterns
-    for service in top_services[:1]:
-        generated.append(f'need {service} partner {location}')
-        generated.append(f'seeking {service} specialized firm {location}')
-        generated.append(f'{service} quote OR proposal {location}')
-    
-    # Pattern 9: Industry-specific service needs
-    if technologies:
-        tech_name = technologies[0]
-        generated.append(f'{target_industries[0]} {tech_name} migration {location} services')
-        generated.append(f'implement {tech_name} {target_industries[0]} {location}')
-    
-    # Pattern 10: User-provided context with buyer focus
+        category = _service_category(service)
+        generated.extend(
+            [
+                f"companies in {location} need {category}",
+                f"{location} startups looking for {category} agency",
+                f"{category} outsourcing {location}",
+                f"{location} company web application vendor selection",
+                f"site:linkedin.com/company \"{location}\" \"looking for\" \"{category}\"",
+                f"site:clutch.co \"{location}\" \"{category}\"",
+                f"{location} digital transformation projects {current_year} {category}",
+            ]
+        )
+        if "dynamics" in service.lower() or "erp" in service.lower():
+            generated.extend(
+                [
+                    f"{location} companies using SAP OR Oracle ERP modernization",
+                    f"{location} ERP implementation partner requirement",
+                    f"{location} manufacturing company IT requirements dynamics 365",
+                ]
+            )
+
+    # Type B: Company-discovery queries (target accounts to approach).
+    for industry in target_industries[:3]:
+        generated.extend(
+            [
+                f"top {industry} companies in {location}",
+                f"funded {industry} startups {location} {current_year}",
+                f"{industry} companies {location} digital transformation",
+                f"{industry} companies {location} IT manager OR CTO",
+                f"site:linkedin.com/company \"{location}\" \"{industry}\" \"IT Manager\"",
+            ]
+        )
+
+    # Keep user wording while forcing buyer intent + location fence.
     if user_query:
-        generated.insert(0, f'{user_query.strip()} services {location}')
-        generated.insert(1, f'{user_query.strip()} partner {location}')
+        query_seed = " ".join(str(user_query).split())
+        generated.insert(0, f"{query_seed} companies in {location} looking for implementation partner")
+        generated.insert(1, f"{query_seed} buyer intent {location}")
 
     return sanitize_queries(generated, max_queries=max_queries)
