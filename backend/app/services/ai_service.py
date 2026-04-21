@@ -307,8 +307,16 @@ Message:
             if hinted_locations:
                 location_hint = hinted_locations[0]
 
+        target_locations_str = ", ".join(profile_brief.get("target_locations", []) or []) or location_hint or "various locations"
+        strict_location = str(location_hint or "").strip() or (
+            str((profile_brief.get("target_locations") or [""])[0]).strip()
+            if (profile_brief.get("target_locations") or [])
+            else ""
+        )
         normalized_location_hint = re.sub(r"\s+", " ", location_hint.strip().lower())
         location_tokens = [tok for tok in re.split(r"\W+", normalized_location_hint) if len(tok) >= 3]
+        strict_location_norm = re.sub(r"\s+", " ", strict_location.lower()).strip()
+        strict_location_tokens = [tok for tok in re.split(r"\W+", strict_location_norm) if len(tok) >= 3]
 
         other_city_tokens = {
             "toronto", "vancouver", "montreal", "london", "newyork", "singapore", "francisco",
@@ -316,10 +324,22 @@ Message:
             "bengaluru", "bangalore", "mumbai", "pune", "hyderabad", "delhi", "gurgaon",
             "gurugram", "chennai", "kolkata", "noida", "ahmedabad", "jaipur", "lucknow",
         }
+        blocked_geo_tokens = {
+            *other_city_tokens,
+            "us", "u.s", "usa", "united states", "america", "north america",
+            "canada", "uk", "u.k", "united kingdom", "australia", "singapore", "uae",
+            "new york", "san francisco", "los angeles", "chicago", "seattle", "boston",
+        }
         if location_tokens:
             for token in location_tokens:
                 if token in other_city_tokens:
                     other_city_tokens.discard(token)
+                if token in blocked_geo_tokens:
+                    blocked_geo_tokens.discard(token)
+        if strict_location_tokens:
+            for token in strict_location_tokens:
+                if token in blocked_geo_tokens:
+                    blocked_geo_tokens.discard(token)
 
         current_date = datetime.utcnow().strftime("%Y-%m-%d")
         current_year = datetime.utcnow().year
@@ -430,9 +450,34 @@ Message:
                 "training institute",
                 "course",
                 "freelancer",
+                "hiring web development vendors",
+                "hiring software vendors",
+                "hiring react developers",
+                "hiring .net development teams",
+                "find companies in all industries",
+                "all sizes that need",
             ]
             if any(fragment in lowered for fragment in seller_disallowed):
                 return False
+
+            # Recruitment-style intent is not buyer intent for service procurement.
+            if "hiring" in lowered and any(
+                token in lowered
+                for token in ["developer", "developers", "engineer", "engineers", "development team", "dev team"]
+            ):
+                return False
+
+            # Exclude explicit IT vendor/agency finder intent.
+            if any(token in lowered for token in ["vendor", "vendors", "agency", "agencies"]):
+                buyer_exception_tokens = [
+                    "looking for implementation partner",
+                    "seeking implementation partner",
+                    "request for proposal",
+                    "rfp",
+                    "procurement",
+                ]
+                if not any(token in lowered for token in buyer_exception_tokens):
+                    return False
 
             if location_tokens and not any(token in lowered for token in location_tokens):
                 return False
@@ -455,7 +500,6 @@ Message:
                 "growth",
                 "looking for",
                 "seeking",
-                "vendor",
                 "digital transformation",
                 "it manager",
                 "cto",
@@ -471,6 +515,27 @@ Message:
 
             return True
 
+        def _passes_strict_location_fence(candidate: str) -> bool:
+            """
+            Post-filter: keep only exact-location queries and reject other geographies.
+            """
+            lowered = re.sub(r"\s+", " ", str(candidate or "").lower()).strip()
+            if not lowered:
+                return False
+
+            if strict_location_norm:
+                if strict_location_norm not in lowered:
+                    # Fallback token check for minor punctuation variation.
+                    if not strict_location_tokens or not all(tok in lowered for tok in strict_location_tokens):
+                        return False
+            elif location_tokens and not all(tok in lowered for tok in location_tokens):
+                return False
+
+            for token in blocked_geo_tokens:
+                if f" {token} " in f" {lowered} ":
+                    return False
+            return True
+
         def _filter_live_queries(candidates: List[str], max_items: int) -> List[str]:
             accepted: List[str] = []
             seen = set()
@@ -484,6 +549,8 @@ Message:
                     continue
                 if not _looks_live_market_query(normalized):
                     continue
+                if not _passes_strict_location_fence(normalized):
+                    continue
 
                 seen.add(key)
                 accepted.append(normalized)
@@ -496,16 +563,14 @@ Message:
             "You are a B2B lead generation specialist. Generate Google search queries ONLY. "
             "Output valid JSON immediately. Do NOT use thinking tags, reasoning, or explanations. "
             "Every response MUST be valid JSON starting with { and ending with }. "
-            f"CRITICAL: ALL queries MUST target this location: {location_hint or target_locations_str}. "
+            f"CRITICAL: ALL search queries MUST target this exact location: {strict_location or location_hint or target_locations_str}. "
             "NEVER generate queries for other cities or countries. "
-            "NEVER generate queries that would find vendors/agencies selling services. "
-            "ONLY generate queries that find COMPANIES WHO WANT TO BUY services."
+            "NEVER generate queries that would find IT vendors or software agencies. ONLY find companies that BUY tech services."
         )
 
         # Build company context for LLM
         company_narrative = profile_brief.get("company_narrative", "")
         target_industries_str = ", ".join(profile_brief.get("target_industries", []) or []) or "various industries"
-        target_locations_str = ", ".join(profile_brief.get("target_locations", []) or []) or location_hint or "various locations"
         services_str = ", ".join(profile_brief.get("services", []) or [])
         technologies_str = ", ".join(profile_brief.get("technologies", []) or [])
         expertise_str = ", ".join(profile_brief.get("expertise_areas", []) or [])
@@ -753,6 +818,7 @@ RETRIEVED_COMPANY_CONTEXT:
                     company_profile=profile_brief,
                     max_queries=limit,
                 )
+                fallback_queries = _filter_live_queries(fallback_queries, max_items=limit * 2)
                 fallback_ranked = rank_high_intent_queries(
                     fallback_queries,
                     location_hint=location_hint,
@@ -767,6 +833,14 @@ RETRIEVED_COMPANY_CONTEXT:
                 ranked_queries = ranked_queries[:limit]
 
             selected_queries = [item.query for item in ranked_queries]
+            selected_queries = [q for q in selected_queries if _passes_strict_location_fence(q)]
+            if len(selected_queries) != len(ranked_queries):
+                print(
+                    "[LEAD QUERY PLANNER] "
+                    f"post_filter_removed={len(ranked_queries) - len(selected_queries)} "
+                    f"location='{strict_location or location_hint or ''}'"
+                )
+                ranked_queries = [item for item in ranked_queries if item.query in set(selected_queries)]
             print(
                 "[LEAD QUERY PLANNER] "
                 f"model={settings.GROQ_MODEL} raw_queries={len(raw_queries)} "

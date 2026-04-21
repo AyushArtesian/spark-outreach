@@ -9,13 +9,13 @@
 - **LLM-Powered Query Planning**: Groq/Qwen generates prospect-finding queries using company context embeddings
 - **Multi-Source Discovery**: Apollo, Serper/SerpAPI web search, job boards with fallback routing
 - **Company Enrichment**: Automatic tech stack, decision-maker, signal detection via Apollo + web scraping
-- **Context-Aware Filtering**: Soft location gates with rescue paths, signal/tech relevance gates
+- **Hard Buyer Filtering**: Competitor/non-buyer disqualification gates at discovery and scoring stages
 
 ### AI/ML Capabilities  
 - **Semantic Embeddings**: Paraphrase-MPN-Base (768D embeddings) for company context retrieval
 - **RAG Pipeline**: Retrieve→Plan→Search→Score workflow with company context integration
 - **Multi-LLM Support**: Groq (Qwen), OpenAI, Gemini with configurable inference parameters
-- **Lead Scoring**: Weighted query matching, signal confidence, tech relevance, location awareness
+- **Lead Scoring**: Transparent 0-100 score card (Company Fit 40 + Buyer Signals 40 + Accessibility 20)
 - **Personalized Outreach**: Email/message generation using retrieved company context
 
 ### Infrastructure
@@ -306,41 +306,64 @@ Main entry point for context-aware query planning:
 
 **Workflow**:
 1. Retrieve company context (5 chunks via embeddings)
-2. Build context summary: target industries, services, location
-3. Call Groq with simplified deterministic prompt
-4. Strip `<think>` tags before JSON parsing
-5. Extract queries with fallback bullet-point parsing
-6. Score queries via `query_scorer`
-7. If avg_score < 0.40 → trigger refinement (second pass)
-8. Return top queries OR deterministic fallback
+2. Build strict planner constraints from request filters (especially `location`)
+3. Call Groq and parse JSON/fallback text safely
+4. Post-filter each query with hard guards:
+   - must include the exact requested location
+   - must not include other city/country tokens
+   - must avoid vendor/agency finder intent
+   - must pass executable/live-market checks
+5. Rank candidate queries via `query_scorer`
+6. If quality/effectiveness is low, run one refinement pass
+7. If needed, merge deterministic fallback queries (also passed through the same hard post-filter)
+8. Return only accepted queries
 
-**Groq Config**: temperature=0.0, require_json=True, model=qwen/qwen3-32b
+**Current Planner Guardrails**:
+- `CRITICAL: ALL search queries MUST target this exact location`
+- Never generate queries for other city/country
+- Never generate queries that find IT vendors/software agencies
+- Only generate queries for companies that BUY tech services
 
 ---
 
 ## 🔍 Lead Service (`lead_service.py`)
 
-**Orchestration of discovery, filtering, and scoring**
+**Orchestration of discovery, filtering, scoring, and final ranking**
 
-### Location-Based Filtering
-- Soft gate with nearby location support
-- Strong-intent rescue: Allow mismatches if strong signals present
-- Metadata persistence: `location_match_mode`, `requested_location_relaxed`
+### Discovery Pipeline
+1. Run source collectors: Apollo, web search, and jobboard intent discovery.
+2. Merge candidates and pre-save dedupe by identity.
+3. Apply hard gates before save:
+   - duplicate domain/contact rejection
+   - competitor disqualification (`DISQUALIFY_TYPES`, `DISQUALIFY_KEYWORDS`, domain token rules)
+   - non-buyer/service-provider rejection (directory/listing/job-portal/agency-style entities)
+   - source-specific quality + signal thresholds
+4. Persist survivors with `raw_data.search_key` for search-intent scoping.
 
-### Signal/Tech Constraint (OR Logic)
-```python
-if signal_confidence < min_signal AND tech_relevance < min_tech:
-    return False
-```
-Web thresholds: quality=0.40, signal=0.15, tech=0.12
+### Search Scope
+- Compute deterministic search key from `(location, industry, services, query)`.
+- Prefer records matching current `search_key`.
+- Fallback to recent-window leads only when scoped matches are absent.
 
-### Query Matching (Weighted)
-- Location tokens: +2.4
-- Service tokens: +2.1
-- Intent tokens: +1.3
-- Other: +0.55
-- Min threshold: 1.5-3.2 (base + bonuses)
-- Strong-hit requirement: ≥1 (relaxed from 2)
+### Scoring-Time Hard Filters
+Before score calculation, each lead is re-checked and can be skipped as:
+- `skipped_constraints`
+- `skipped_competitor`
+- `skipped_non_buyer`
+
+### Scoring Model (Current)
+`total_score = company_fit(0-40) + buyer_signal_strength(0-40) + accessibility(0-20)`
+
+Grade/action mapping:
+- `A` (`>=80`) → `contact_immediately`
+- `B` (`>=60`) → `add_to_sequence`
+- `C` (`>=40`) → `nurture`
+- `D` (`<40`) → `skip`
+
+### Final Ranking + Dedupe
+- Rank by combined score (or requested sort mode).
+- Keep only best record per normalized identity key.
+- Summary logs expose `collapsed_duplicates` and all skip counters.
 
 ---
 
@@ -383,12 +406,18 @@ Web thresholds: quality=0.40, signal=0.15, tech=0.12
 ```
 
 **Workflow**:
-1. Retrieve company context & target profiles
-2. Call `plan_lead_discovery_queries()` for context-aware queries
-3. Execute `discover_company_websites()` for web search
-4. Call `_discover_and_seed_leads()` for multi-source discovery
-5. Score leads via `_lead_matches_search_constraints()`
-6. Return scored + filtered leads (max 50)
+1. Load company profile and retrieve context chunks for planning.
+2. Generate LLM queries with strict constraints:
+   - exact target location only
+   - no other city/country
+   - buyer-company intent only (not IT vendor/agency discovery)
+3. Post-filter generated queries (location fence + geo rejection + intent checks).
+4. Discover candidates across Apollo + web + jobboard sources.
+5. Run discovery-time hard filters and save only valid survivors.
+6. Scope candidates by `search_key` for this exact search intent.
+7. Re-filter at scoring time (`constraints`, `competitor`, `non_buyer`).
+8. Score with `company_fit + buyer_signal_strength + accessibility`.
+9. Rank, dedupe, and return top-K leads.
 
 ---
 
@@ -475,6 +504,7 @@ pytest tests/services/test_web_scraper.py -v
 | Groq API errors | Check API key, model name, rate limits |
 | Web scraper timeout | Increase `REQUEST_TIMEOUT` or limit internal pages |
 | No leads found | Check query planner logs; may need relaxed location gates |
+| Too many similar/duplicate leads | Inspect scoring summary counters: `collapsed_duplicates`, `skipped_competitor`, `skipped_non_buyer`, and confirm `search_key` scoping is active |
 
 ---
 

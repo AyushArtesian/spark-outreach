@@ -285,6 +285,64 @@ class LeadService:
         return None
 
     @staticmethod
+    def _detect_non_buyer_reason(company_name: str, text_blob: str) -> str:
+        """
+        Detect non-buyer/service-provider entities that should not enter buyer scoring.
+        Returns short reason when matched, else empty string.
+        """
+        text = f"{str(company_name or '').lower()} {str(text_blob or '').lower()}"
+        service_provider_phrases = [
+            "web designing company",
+            "web development company",
+            "software development company",
+            "digital agency",
+            "design agency",
+            "ui ux studio",
+            "consulting services",
+            "outsourcing services",
+            "it services company",
+            "app development company",
+        ]
+        directory_phrases = [
+            "top 10",
+            "top 50",
+            "top 100",
+            "list of",
+            "directory",
+            "best companies",
+            "company rankings",
+        ]
+        job_portal_phrases = [
+            "job portal",
+            "find jobs",
+            "freelance jobs",
+            "hiring platform",
+        ]
+        government_edu_phrases = [
+            "government",
+            "department",
+            "ministry",
+            "university",
+            "college",
+            "school",
+            "institute",
+        ]
+
+        for phrase in service_provider_phrases:
+            if phrase in text:
+                return f"service_provider:{phrase}"
+        for phrase in directory_phrases:
+            if phrase in text:
+                return f"directory:{phrase}"
+        for phrase in job_portal_phrases:
+            if phrase in text:
+                return f"job_portal:{phrase}"
+        for phrase in government_edu_phrases:
+            if phrase in text:
+                return f"non_buyer:{phrase}"
+        return ""
+
+    @staticmethod
     def _ensure_negative_filters(query: str) -> str:
         """Ensure common job-page exclusions are always present in SERP queries."""
         compact = re.sub(r"\s+", " ", str(query or "").strip())
@@ -479,14 +537,30 @@ class LeadService:
         """Build a stable dedupe key for result collapsing."""
         raw = lead.raw_data or {}
         domain = LeadService._canonical_domain(str(raw.get("source_url", "")))
+        company = LeadService._normalized_company_identity(str(lead.company or lead.name or ""))
+        if company and len(company.split()) >= 2:
+            return f"company:{company}"
         if domain:
             return f"domain:{domain}"
-
-        company = re.sub(r"\s+", " ", str(lead.company or lead.name or "").strip().lower())
         if company:
             return f"company:{company}"
 
         return f"lead:{str(lead.id)}"
+
+    @staticmethod
+    def _normalized_company_identity(value: str) -> str:
+        """Normalize company text for fuzzy dedupe across small naming variants."""
+        cleaned = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())).strip()
+        if not cleaned:
+            return ""
+        stop_tokens = {
+            "the", "a", "an", "and", "of", "for", "to", "in", "on", "at", "by",
+            "pvt", "ltd", "llp", "inc", "co", "corp", "corporation", "private", "limited",
+        }
+        tokens = [tok for tok in cleaned.split() if tok and tok not in stop_tokens]
+        if not tokens:
+            return ""
+        return " ".join(tokens[:5])
 
     @staticmethod
     def _discovery_candidate_key(item: Dict[str, Any]) -> str:
@@ -505,11 +579,7 @@ class LeadService:
         if email:
             return f"email:{email}"
 
-        company = re.sub(
-            r"\s+",
-            " ",
-            re.sub(r"[^a-z0-9]+", " ", str(item.get("company") or item.get("name") or "").strip().lower()),
-        ).strip()
+        company = LeadService._normalized_company_identity(str(item.get("company") or item.get("name") or ""))
         if company:
             return f"company:{company}"
 
@@ -1341,49 +1411,6 @@ class LeadService:
         skipped_location_mismatch = 0
         skipped_competitor = 0
         
-        def _is_service_provider_or_wrong_type(company_name: str, snippet: str) -> bool:
-            """Filter out service providers, job boards, and other non-buyers"""
-            text = (f"{company_name} {snippet}").lower()
-            
-            # Service providers/agencies (they SELL services, not BUY)
-            service_provider_keywords = [
-                "design", "agency", "studio", "firm", "consulting", "services",
-                "solution provider", "vendor", "freelance", "outsource",
-                "web designing", "ui/ux", "developer", "programmer",
-            ]
-            
-            # Job boards and recruitment (they're not buyers)
-            job_board_keywords = [
-                "hire", "jobs", "recruitment", "recruiter", "careers",
-                "freelancer", "employment", "hiring platform",
-                "job board", "job portal", "job search"
-            ]
-            
-            # Government and educational (not target buyers)
-            non_buyer_keywords = [
-                "government", "department", "ministry", "federal", "state",
-                "education", "university", "school", "college", "institute",
-                "list of", "directory", "top 10", "top 50", "top 100",
-                "rankings", "comparison", "salary", "comparison tool"
-            ]
-            
-            # Check for service provider patterns
-            if any(kw in text for kw in service_provider_keywords):
-                # However, some companies may be service providers but still builders
-                # So check if they're also actively hiring (expansion signal)
-                if not any(hiring_kw in text for hiring_kw in ["hiring", "recruiting", "jobs open"]):
-                    return True
-            
-            # Check for job boards
-            if any(kw in text for kw in job_board_keywords):
-                return True
-            
-            # Check for non-buyers
-            if any(kw in text for kw in non_buyer_keywords):
-                return True
-            
-            return False
-        
         for item in discovered:
             item_source = str(item.get("source") or "web_discovery").strip().lower()
             domain = self._canonical_domain(item.get("domain") or item.get("url") or item.get("company_website") or "")
@@ -1510,8 +1537,13 @@ class LeadService:
                 continue
             
             # Filter out service providers, job boards, and non-buyer companies
-            if _is_service_provider_or_wrong_type(company_name, snippet):
+            non_buyer_reason = self._detect_non_buyer_reason(company_name, combined_quality_text)
+            if non_buyer_reason:
                 skipped_low_quality += 1
+                print(
+                    f"[LEAD DISCOVERY] skipped_non_buyer company='{company_name}' "
+                    f"reason={non_buyer_reason}"
+                )
                 continue
             
             if any(
@@ -2261,6 +2293,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
         collapsed_duplicates = 0
         rescued_relaxed_constraints = 0
         skipped_competitor = 0
+        skipped_non_buyer = 0
 
         apollo_only_mode = bool((filters or {}).get("apollo_only"))
         source_mode = str((filters or {}).get("source_mode") or "").strip().lower()
@@ -2362,6 +2395,22 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
                 print(
                     f"[LEAD SCORING] skipped_competitor company='{lead.company or 'unknown'}' "
                     f"reason={competitor_reason}"
+                )
+                continue
+
+            non_buyer_reason = self._detect_non_buyer_reason(
+                lead.company or "",
+                competitor_text,
+            )
+            if non_buyer_reason:
+                skipped_non_buyer += 1
+                lead.raw_data = lead.raw_data or {}
+                lead.raw_data["skip_reason"] = "skipped_non_buyer"
+                lead.raw_data["skip_detail"] = non_buyer_reason
+                lead.save()
+                print(
+                    f"[LEAD SCORING] skipped_non_buyer company='{lead.company or 'unknown'}' "
+                    f"reason={non_buyer_reason}"
                 )
                 continue
 
@@ -2501,6 +2550,7 @@ Team Expertise: {', '.join(company_profile.team_expertise or [])}
               f"skipped_constraints={skipped_constraints} "
               f"rescued_relaxed={rescued_relaxed_constraints} "
               f"skipped_competitor={skipped_competitor} "
+              f"skipped_non_buyer={skipped_non_buyer} "
               f"skipped_no_signals={skipped_no_signals} "
               f"skipped_low_relevance={skipped_low_relevance} "
               f"skipped_low_score={skipped_low_score} "
