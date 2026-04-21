@@ -136,6 +136,22 @@ class JobBoardService:
         return host.replace("www.", "")
 
     @staticmethod
+    def _canonical_domain(url_or_host: str) -> str:
+        """Normalize URL/domain to a stable root domain for dedupe checks."""
+        host = JobBoardService._extract_domain(url_or_host).split(":", 1)[0].replace("m.", "")
+        if not host or "." not in host:
+            return host
+
+        parts = [part for part in host.split(".") if part]
+        if len(parts) <= 2:
+            return host
+
+        # Keep 3 labels for ccTLDs such as example.co.in
+        if parts[-2] == "co" and parts[-1] in {"in", "uk", "au", "nz", "jp"}:
+            return ".".join(parts[-3:])
+        return ".".join(parts[-2:])
+
+    @staticmethod
     def _is_blocked_discovery_domain(domain: str) -> bool:
         blocked = (
             "indeed.",
@@ -161,6 +177,13 @@ class JobBoardService:
             "sulekha.",
             "clutch.",
             "g2.",
+            "goodfirms.",
+            "businessofapps.",
+            "topdevelopers.",
+            "mobileappdaily.",
+            "sortlist.",
+            "yellowpages.",
+            "yelp.",
             "internshala.",
             "timesjobs.",
             "freshersworld.",
@@ -177,11 +200,132 @@ class JobBoardService:
             "rfpmart.",
             "tender247.",
             "tenderdekho.",
+            "tendernotice.",
+            "nationaltenders.",
+            "tender18.",
+            "biddetail.",
+            "bdtender.",
+            "tendersniper.",
+            "jobrapido.",
             "policycommons.",
             "scribd.",
             "researchgate.",
         )
         return any(token in domain for token in blocked)
+
+    @staticmethod
+    def _is_low_value_company_name(company_name: str) -> bool:
+        """Reject obvious non-company names commonly seen in noisy job-board results."""
+        text = re.sub(r"\s+", " ", str(company_name or "").strip().lower())
+        if not text or len(text) < 2:
+            return True
+
+        if text in {
+            "confidential", "anonymous", "multiple openings", "urgent hiring",
+            "website", "contact", "company", "site", "page", "home",
+            "[pdf]", "pdf", "document", "form", "details",
+            "in", "on", "at", "the", "and", "or",
+        }:
+            return True
+
+        low_value_tokens = (
+            "job",
+            "jobs",
+            "hiring",
+            "vacancy",
+            "vacancies",
+            "walk in",
+            "walk-in",
+            "recruitment",
+            "staffing",
+            "placement",
+            "manpower",
+            "consultancy",
+            "consultancies",
+            "hr services",
+            "career",
+            "careers",
+            "freshers",
+            "portal",
+            "board",
+            "network",
+            "exchange",
+            "directory",
+            "aggregator",
+            "marketplace",
+            "platform",
+            "language selector",
+            "response to queries",
+            "tendernotice",
+            "tender notice",
+        )
+        return any(token in text for token in low_value_tokens)
+
+    @classmethod
+    def _validate_company_candidate(cls, job: Dict[str, Any]) -> tuple[bool, str]:
+        """Apply final quality gates before dedupe/persistence and return reason."""
+        company_name = cls._clean_text(job.get("company_name", ""))
+        if not company_name:
+            return False, "missing_company_name"
+
+        if cls._is_low_value_company_name(company_name):
+            return False, "low_value_company_name"
+
+        website = cls._clean_text(job.get("company_website", ""))
+        source_url = cls._clean_text(job.get("job_url", ""))
+        raw_domain = cls._extract_domain(website) or cls._extract_domain(source_url)
+        domain = cls._canonical_domain(raw_domain)
+
+        if domain and cls._is_blocked_discovery_domain(domain):
+            return False, "blocked_or_aggregator_domain"
+
+        signal = cls._clean_text(job.get("signal_type", ""))
+        if str(job.get("source", "")).lower() == "web" and not signal:
+            return False, "missing_signal_type_for_web_result"
+
+        # For web results, check if this looks like a service-provider page, not a buyer page
+        if str(job.get("source", "")).lower() == "web":
+            title = cls._clean_text(job.get("job_title", ""))
+            snippet = cls._clean_text(job.get("buyer_signal", ""))
+            result_url = cls._clean_text(job.get("job_url", ""))
+
+            weak_signal_types = {"generic_mention", "hiring_technical", ""}
+            if signal.lower() in weak_signal_types and not cls._has_strong_buyer_signal(title, snippet, result_url):
+                return False, "weak_or_generic_intent_signal"
+            
+            # Reject pages that are clearly service provider marketing or template pages
+            vendor_reject_tokens = (
+                "rfp template",
+                "download rfp",
+                "rfi template",
+                "request for proposal template",
+                "our services",
+                "we offer",
+                "we provide",
+                "hire us",
+                "contact us form",
+                "get a quote",
+                "request a quote",
+                "book a demo",
+                "schedule a call",
+                "case study",
+                "/blog/",
+                "/portfolio/",
+                "/case-studies/",
+                "/resources/",
+                "/company/",
+                "/about-us/",
+                "/why-choose",
+                "leading mobile app",
+                "leading app development",
+                "top app development",
+                "best app developers",
+            )
+            full_text = f"{title} {snippet} {result_url}".lower()
+            if any(token in full_text for token in vendor_reject_tokens):
+                return False, "service_provider_marketing_page"
+
+        return True, "accepted"
 
     @staticmethod
     def _domain_to_company_name(domain: str) -> str:
@@ -495,7 +639,34 @@ class JobBoardService:
             return "expansion"
         if "partner" in text or "vendor" in text or "implementation" in text or "consulting" in text:
             return "seeking_partner"
-        return "hiring_technical"
+        if "hiring" in text or "recruiting" in text or "careers" in text:
+            return "hiring_technical"
+        return "generic_mention"
+
+    @staticmethod
+    def _has_strong_buyer_signal(title: str, snippet: str, url: str) -> bool:
+        """Require explicit buyer-side intent, not generic keyword mentions."""
+        text = f"{title} {snippet} {url}".lower()
+        strong_buyer_tokens = (
+            "request for proposal",
+            "rfp",
+            "request for quotation",
+            "rfq",
+            "request for information",
+            "rfi",
+            "expression of interest",
+            "eoi",
+            "invites bids",
+            "bid submission",
+            "tender notice",
+            "proposal due",
+            "vendor selection",
+            "seeking vendor",
+            "looking for vendor",
+            "seeking implementation partner",
+            "looking for implementation partner",
+        )
+        return any(token in text for token in strong_buyer_tokens)
 
     @staticmethod
     def _resolve_duckduckgo_redirect(raw_link: str) -> str:
@@ -1173,16 +1344,32 @@ class JobBoardService:
         deduped: Dict[str, Dict[str, Any]] = {}
         for job in all_jobs:
             company_name = self._clean_text(job.get("company_name", ""))
-            if not company_name:
+            is_valid, reason = self._validate_company_candidate(job)
+            if not is_valid:
+                print(
+                    "[JOBBOARD][FILTER] reject "
+                    f"reason={reason} company='{company_name or 'unknown'}' "
+                    f"source='{self._clean_text(job.get('source', ''))}'"
+                )
                 continue
 
             website = self._clean_text(job.get("company_website", ""))
             source_url = self._clean_text(job.get("job_url", ""))
-            domain = self._extract_domain(website) or self._extract_domain(source_url)
+            domain = self._canonical_domain(website) or self._canonical_domain(source_url)
 
             key = domain or self._normalize_company_key(company_name)
             if not key:
+                print(
+                    "[JOBBOARD][FILTER] reject "
+                    f"reason=missing_dedupe_key company='{company_name}' "
+                    f"source='{self._clean_text(job.get('source', ''))}'"
+                )
                 continue
+
+            print(
+                "[JOBBOARD][FILTER] accept "
+                f"company='{company_name}' key='{key}' source='{self._clean_text(job.get('source', ''))}'"
+            )
 
             current = deduped.get(key)
             if not current:
@@ -1192,6 +1379,7 @@ class JobBoardService:
             current_has_site = bool(self._clean_text(current.get("company_website", "")))
             new_has_site = bool(self._clean_text(job.get("company_website", "")))
             if new_has_site and not current_has_site:
+                print(f"[JOBBOARD][DEDUPE] replace key='{key}' reason=has_company_website")
                 deduped[key] = job
                 continue
 
@@ -1206,12 +1394,14 @@ class JobBoardService:
                 "digital_transformation",
             }
             if new_has_better_signal and not current_has_better_signal:
+                print(f"[JOBBOARD][DEDUPE] replace key='{key}' reason=better_signal_type")
                 deduped[key] = job
                 continue
 
             current_has_date = bool(self._clean_text(current.get("posted_date", "")))
             new_has_date = bool(self._clean_text(job.get("posted_date", "")))
             if new_has_date and not current_has_date:
+                print(f"[JOBBOARD][DEDUPE] replace key='{key}' reason=has_posted_date")
                 deduped[key] = job
 
         print(f"[JOBBOARD] Returning {len(deduped)} deduplicated companies")

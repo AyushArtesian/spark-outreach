@@ -436,7 +436,14 @@ class IntentMonitorService:
             intent_threshold = schedule.intent_threshold if schedule else 0.50
 
             campaign_leads = list(
-                Lead.objects(campaign_id=str(campaign_id)).only('id', 'company', 'name', 'email', 'raw_data')
+                Lead.objects(campaign_id=str(campaign_id)).only(
+                    'id',
+                    'campaign_id',
+                    'company',
+                    'name',
+                    'email',
+                    'raw_data',
+                )
             )
             lead_by_company: Dict[str, Lead] = {}
             lead_by_domain: Dict[str, Lead] = {}
@@ -588,6 +595,12 @@ class IntentMonitorService:
                                 if summary:
                                     existing.raw_data['company_summary'] = summary
                                     updated = True
+
+                            # Legacy guard: ensure required field is present before save.
+                            # Some older records or projected documents may miss campaign_id.
+                            if not str(getattr(existing, 'campaign_id', '') or '').strip():
+                                existing.campaign_id = str(campaign_id)
+                                updated = True
 
                             if updated:
                                 existing.updated_at = datetime.utcnow()

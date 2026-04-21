@@ -367,6 +367,100 @@ class LeadService:
         return f"lead:{str(lead.id)}"
 
     @staticmethod
+    def _discovery_candidate_key(item: Dict[str, Any]) -> str:
+        """Build stable key for pre-save dedupe across discovered candidates."""
+        domain = LeadService._canonical_domain(
+            str(item.get("domain") or item.get("url") or item.get("company_website") or "")
+        )
+        if domain:
+            return f"domain:{domain}"
+
+        apollo_person_id = str(item.get("apollo_person_id") or "").strip()
+        if apollo_person_id:
+            return f"apollo:{apollo_person_id}"
+
+        email = str(item.get("email") or "").strip().lower()
+        if email:
+            return f"email:{email}"
+
+        company = re.sub(
+            r"\s+",
+            " ",
+            re.sub(r"[^a-z0-9]+", " ", str(item.get("company") or item.get("name") or "").strip().lower()),
+        ).strip()
+        if company:
+            return f"company:{company}"
+
+        return ""
+
+    @staticmethod
+    def _discovery_candidate_rank(item: Dict[str, Any]) -> Tuple[float, int]:
+        """Rank discovered candidates so dedupe keeps highest-quality record per identity."""
+        source = str(item.get("source") or "").strip().lower()
+        signal_type = str(item.get("signal_type") or item.get("intent_signal") or "").strip().lower()
+        signal_blob = " ".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+                str(item.get("job_title") or ""),
+            ]
+        ).lower()
+
+        source_weight = 0.0
+        if source.startswith("apollo"):
+            source_weight = 0.44
+        elif source.startswith("job_board"):
+            source_weight = 0.34
+        else:
+            source_weight = 0.24
+
+        signal_weight = 0.0
+        if signal_type in {"rfp_posted", "seeking_partner", "digital_transformation"}:
+            signal_weight = 0.26
+        elif signal_type in {"hiring", "hiring_technical", "expansion", "funding"}:
+            signal_weight = 0.18
+        elif any(token in signal_blob for token in ("rfp", "tender", "vendor", "implementation")):
+            signal_weight = 0.12
+
+        quality = source_weight + signal_weight
+
+        has_domain = bool(
+            LeadService._canonical_domain(
+                str(item.get("domain") or item.get("url") or item.get("company_website") or "")
+            )
+        )
+        has_email = bool(str(item.get("email") or "").strip())
+        has_apollo_id = bool(str(item.get("apollo_person_id") or "").strip())
+        has_linkedin = bool(str(item.get("linkedin_url") or "").strip())
+        has_posted_date = bool(str(item.get("posted_date") or "").strip())
+        has_rich_snippet = len(str(item.get("snippet") or "").strip()) >= 80
+        has_named_company = len(str(item.get("company") or item.get("name") or "").strip()) >= 3
+
+        quality += 0.12 if has_email else 0.0
+        quality += 0.10 if has_apollo_id else 0.0
+        quality += 0.05 if has_linkedin else 0.0
+        quality += 0.04 if has_posted_date else 0.0
+        quality += 0.05 if has_rich_snippet else 0.0
+        quality += 0.04 if has_named_company else 0.0
+        quality += 0.06 if has_domain else 0.0
+
+        completeness = sum(
+            1
+            for value in (
+                has_domain,
+                has_email,
+                has_apollo_id,
+                has_linkedin,
+                has_posted_date,
+                has_rich_snippet,
+                has_named_company,
+            )
+            if value
+        )
+
+        return quality, completeness
+
+    @staticmethod
     def _clamp_int(value: float, minimum: int, maximum: int) -> int:
         return max(minimum, min(maximum, int(round(value))))
 
@@ -897,6 +991,7 @@ class LeadService:
 
         apollo_discovered: List[Dict[str, Any]] = []
         apollo_credit_exhausted = False
+        apollo_failed = False
         if apollo_service.enabled:
             try:
                 apollo_discovered = await apollo_service.search_people(
@@ -909,30 +1004,36 @@ class LeadService:
                 )
                 apollo_credit_exhausted = bool(getattr(apollo_service, "last_run_credit_exhausted", False))
             except Exception as e:
+                apollo_failed = True
                 print(f"[APOLLO] Discovery failed: {e}")
         else:
             print("[APOLLO] APOLLO_API_KEY missing; skipping Apollo people discovery.")
 
         web_discovered: List[Dict[str, Any]] = []
-        apollo_only_mode = bool(apollo_service.enabled and not apollo_credit_exhausted)
-        if apollo_only_mode:
-            if apollo_discovered:
-                print(
-                    "[LEAD DISCOVERY SOURCES] "
-                    "Apollo-only mode active. Skipping SerpAPI fallback."
-                )
-            else:
-                print(
-                    "[LEAD DISCOVERY SOURCES] "
-                    "Apollo-only mode active but Apollo returned 0 results. "
-                    "Skipping SerpAPI fallback by request."
-                )
-        else:
-            if apollo_service.enabled and apollo_credit_exhausted:
-                print(
-                    "[LEAD DISCOVERY SOURCES] "
-                    "Apollo credits exhausted. Enabling SerpAPI/web fallback for this search."
-                )
+        apollo_preferred_mode = bool(apollo_service.enabled and not apollo_credit_exhausted)
+        should_run_web_fallback = (
+            not apollo_preferred_mode
+            or not apollo_discovered
+        )
+
+        if apollo_preferred_mode and apollo_discovered:
+            print(
+                "[LEAD DISCOVERY SOURCES] "
+                "Apollo-preferred mode active. Using Apollo results and skipping SerpAPI/web fallback."
+            )
+        elif apollo_preferred_mode and not apollo_discovered:
+            reason = "Apollo failure" if apollo_failed else "Apollo returned 0 results"
+            print(
+                "[LEAD DISCOVERY SOURCES] "
+                f"{reason}. Enabling SerpAPI/web fallback for this search."
+            )
+        elif apollo_service.enabled and apollo_credit_exhausted:
+            print(
+                "[LEAD DISCOVERY SOURCES] "
+                "Apollo credits exhausted. Enabling SerpAPI/web fallback for this search."
+            )
+
+        if should_run_web_fallback:
             web_limit = max(5, int(max_results))
             web_discovered = await discover_company_websites(
                 query=query,
@@ -1018,14 +1119,41 @@ class LeadService:
         except Exception as e:
             print(f"[JOBBOARD] Discovery failed: {e}")
 
-        if apollo_only_mode:
+        if apollo_preferred_mode and apollo_discovered and not web_discovered:
             discovered = [*apollo_discovered, *jobboard_discovered]
         else:
             discovered = [*apollo_discovered, *web_discovered, *jobboard_discovered]
+
+        # Collapse duplicate discovered candidates early and keep best-quality record per identity.
+        best_discovered_by_key: Dict[str, Tuple[Dict[str, Any], Tuple[float, int]]] = {}
+        fallback_discovered: List[Dict[str, Any]] = []
+        collapsed_discovered_duplicates = 0
+        for item in discovered:
+            dedupe_key = self._discovery_candidate_key(item)
+            if not dedupe_key:
+                fallback_discovered.append(item)
+                continue
+
+            rank = self._discovery_candidate_rank(item)
+            best = best_discovered_by_key.get(dedupe_key)
+            if not best:
+                best_discovered_by_key[dedupe_key] = (item, rank)
+                continue
+
+            if rank > best[1]:
+                best_discovered_by_key[dedupe_key] = (item, rank)
+                collapsed_discovered_duplicates += 1
+            else:
+                collapsed_discovered_duplicates += 1
+
+        deduped_discovered = [entry[0] for entry in best_discovered_by_key.values()]
+        discovered = [*deduped_discovered, *fallback_discovered]
+
         print(
             "[LEAD DISCOVERY SOURCES] "
             f"apollo={len(apollo_discovered)} web={len(web_discovered)} "
-            f"jobboard={len(jobboard_discovered)} total_candidates={len(discovered)}"
+            f"jobboard={len(jobboard_discovered)} total_candidates={len(discovered)} "
+            f"collapsed_discovered_duplicates={collapsed_discovered_duplicates}"
         )
         if not discovered:
             return 0
