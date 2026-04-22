@@ -303,6 +303,38 @@ class LeadService:
             "it services company",
             "app development company",
         ]
+        seller_marketing_phrases = [
+            "we provide",
+            "we offer",
+            "our services",
+            "our solutions",
+            "hire us",
+            "contact us today",
+            "request a quote",
+            "get quote",
+            "book a demo",
+            "schedule a call",
+            "if you're looking for",
+            "if you are looking for",
+            "you are at the right place",
+            "at the right place",
+            "submit rfp",
+            "attach your rfp",
+        ]
+        seller_service_terms = [
+            "web development",
+            "software development",
+            "app development",
+            "mobile app development",
+            "development services",
+            "it consulting",
+            "digital transformation consulting",
+            "staff augmentation",
+            "outsourcing",
+            "dynamics 365",
+            "power apps",
+            "erp implementation",
+        ]
         directory_phrases = [
             "top 10",
             "top 50",
@@ -331,6 +363,12 @@ class LeadService:
         for phrase in service_provider_phrases:
             if phrase in text:
                 return f"service_provider:{phrase}"
+        has_marketing_phrase = any(phrase in text for phrase in seller_marketing_phrases)
+        has_seller_service_term = any(term in text for term in seller_service_terms)
+        if has_marketing_phrase and has_seller_service_term:
+            return "service_provider:seller_marketing_copy"
+        if re.search(r"\b(if|when)\s+you\s+(need|require|are looking for|looking for)\b", text) and has_seller_service_term:
+            return "service_provider:second_person_service_pitch"
         for phrase in directory_phrases:
             if phrase in text:
                 return f"directory:{phrase}"
@@ -1572,6 +1610,31 @@ class LeadService:
             signal_keywords = list(signal_layer.get("signals", []))
             signal_reasons = list(signal_layer.get("reason", []))
             tech_relevance = float(signal_layer.get("tech_relevance", 0.0) or 0.0)
+            seller_marketing_score = float(signal_layer.get("seller_marketing_score", 0.0) or 0.0)
+            is_seller_intent = bool(signal_layer.get("is_seller_intent", False))
+
+            if is_seller_intent:
+                strict_procurement_present = any(
+                    token in combined_quality_text
+                    for token in [
+                        "invites bids",
+                        "issued by",
+                        "tender notice",
+                        "proposal due",
+                        "bid submission",
+                        "request for quotation",
+                        "rfq",
+                        "request for information",
+                        "rfi",
+                    ]
+                )
+                if not strict_procurement_present:
+                    skipped_low_quality += 1
+                    print(
+                        f"[LEAD DISCOVERY] skipped_non_buyer company='{company_name}' "
+                        f"reason=seller_marketing_score:{seller_marketing_score:.2f}"
+                    )
+                    continue
 
             if item_source.startswith("apollo"):
                 min_signal_gate = 0.18
@@ -1631,8 +1694,10 @@ class LeadService:
             snippet_tokens = [t for t in re.split(r"\W+", snippet) if len(t) >= 3]
             if len(snippet_tokens) >= 8:
                 quality_score += 0.12
-            if any(tok in snippet for tok in ["services", "solutions", "platform", "software", "consulting", "development"]):
+            if any(tok in snippet for tok in ["platform", "product", "operations", "procurement", "manufacturing", "retail", "healthcare", "logistics", "fintech", "ecommerce"]):
                 quality_score += 0.10
+            if any(tok in snippet for tok in ["we provide", "we offer", "hire us", "request a quote", "development services", "consulting services", "staff augmentation", "outsourcing"]):
+                quality_score -= 0.18
             if domain.endswith(".com") or domain.endswith(".in") or domain.endswith(".io"):
                 quality_score += 0.08
 

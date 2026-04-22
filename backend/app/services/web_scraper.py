@@ -50,6 +50,23 @@ LOCATION_ALIASES = {
     "new delhi": "delhi",
 }
 
+BUYER_QUERY_TEMPLATES = [
+    "{industry} companies {location}",
+    "{location} {industry} digital transformation",
+    "{location} {industry} company website",
+    "top {industry} businesses in {location}",
+    "{location} SMB looking for {service_category}",
+    "site:linkedin.com/company {location} {industry}",
+    "{location} {industry} ERP implementation",
+]
+
+SERVICE_CATEGORY_MAP = {
+    "dynamics 365": "ERP",
+    "web development": "website redesign",
+    "mobile app": "app development",
+    "software development": "custom software",
+}
+
 
 def _normalize_url(url: str) -> str:
     """Ensure URLs are absolute and normalized."""
@@ -88,6 +105,21 @@ def _clean_search_query_text(raw_query: str) -> str:
     text = re.sub(r"[^a-z0-9\s]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _resolve_service_category(service_focus: Optional[list]) -> str:
+    """Map a service label to buyer-side language for intent discovery queries."""
+    normalized_service = " ".join(
+        [str(item).strip().lower() for item in (service_focus or []) if str(item).strip()]
+    ).strip()
+    if not normalized_service:
+        return "digital transformation"
+
+    for source, mapped in SERVICE_CATEGORY_MAP.items():
+        if source in normalized_service:
+            return mapped
+
+    return str(service_focus[0]).strip() if service_focus else "digital transformation"
 
 
 def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
@@ -172,6 +204,100 @@ def _is_valid_planned_query(query: str, location: Optional[str] = None) -> bool:
     return True
 
 
+def _is_service_scoped_planned_query(query: str, service_focus: Optional[list]) -> bool:
+    """Validate that planned query stays aligned with requested service focus."""
+    requested_services = [
+        re.sub(r"\s+", " ", str(item).strip().lower())
+        for item in (service_focus or [])
+        if str(item).strip()
+    ]
+    if not requested_services:
+        return True
+
+    alias_map = {
+        "web development": [
+            "web app development",
+            "website development",
+            "website redesign",
+            "website revamp",
+        ],
+        "software development": [
+            "custom software",
+            "application development",
+            "product engineering",
+        ],
+        "mobile app": [
+            "app development",
+            "mobile application",
+            "android app",
+            "ios app",
+        ],
+    }
+    stopwords = {
+        "and",
+        "for",
+        "with",
+        "from",
+        "the",
+        "services",
+        "service",
+        "solutions",
+        "company",
+        "development",
+    }
+    allowed_phrases: set[str] = set()
+    allowed_tokens: set[str] = set()
+    for service in requested_services:
+        phrases = [service, *(alias_map.get(service, []))]
+        for phrase in phrases:
+            normalized = re.sub(r"\s+", " ", phrase.strip().lower())
+            if not normalized:
+                continue
+            allowed_phrases.add(normalized)
+            for token in re.split(r"\W+", normalized):
+                token = token.strip()
+                if len(token) < 4 or token in stopwords:
+                    continue
+                allowed_tokens.add(token)
+
+    blocked_terms = {
+        "microsoft dynamics",
+        "dynamics 365",
+        "power apps",
+        "power automate",
+        "sap",
+        "oracle erp",
+        "erp",
+        "crm",
+        "salesforce",
+        "servicenow",
+    }
+    permitted_blocked_terms = {
+        term
+        for term in blocked_terms
+        if any(term in phrase for phrase in allowed_phrases)
+    }
+
+    lowered = re.sub(r"\s+", " ", str(query or "").lower()).strip()
+    if not lowered:
+        return False
+
+    for term in blocked_terms:
+        if term in lowered and term not in permitted_blocked_terms:
+            return False
+
+    if any(phrase in lowered for phrase in allowed_phrases if len(phrase) >= 4):
+        return True
+
+    matched = 0
+    for token in allowed_tokens:
+        if re.search(rf"\b{re.escape(token)}\b", lowered):
+            matched += 1
+        if matched >= 2:
+            return True
+    return False
+
+
 def _normalize_planned_query_for_search(query: str) -> str:
     """Repair malformed LLM query text so search providers receive executable syntax."""
     text = str(query or "").strip().lower()
@@ -227,41 +353,20 @@ def generate_high_intent_queries(
     else:
         industries = priority_industries[:3]
 
-    service_items = [str(s).strip().lower() for s in (service_focus or []) if str(s).strip()]
-    primary_service = service_items[0] if service_items else "web development"
-    cleaned_seed = _clean_search_query_text(query)
+    service_category = _resolve_service_category(service_focus)
 
-    templates = [
-        f"companies in {normalized_location} need {primary_service}",
-        f"{normalized_location} startups looking for {primary_service} partner",
-        f"{primary_service} vendor selection {normalized_location}",
-        f"{primary_service} request for proposal {normalized_location}",
-        f"digital transformation projects {normalized_location} {primary_service}",
-        f"site:linkedin.com/company {normalized_location} CTO IT manager",
-        f"site:clutch.co {normalized_location} project requirements {primary_service}",
-    ]
-
+    templates: List[str] = []
     for vertical in industries[:3]:
         templates.extend(
             [
-                f"top {vertical} companies in {normalized_location}",
-                f"funded {vertical} startups {normalized_location}",
-                f"{vertical} companies {normalized_location} digital transformation",
-                f"{vertical} companies {normalized_location} ERP modernization",
+                template.format(
+                    industry=vertical,
+                    location=normalized_location,
+                    service_category=service_category,
+                )
+                for template in BUYER_QUERY_TEMPLATES
             ]
         )
-
-    if "dynamics" in primary_service or "erp" in primary_service:
-        templates.extend(
-            [
-                f"{normalized_location} companies using SAP OR Oracle ERP",
-                f"{normalized_location} manufacturing company IT requirements ERP",
-                f"{normalized_location} ERP implementation partner requirement",
-            ]
-        )
-
-    if cleaned_seed:
-        templates.insert(0, f"{cleaned_seed} companies in {normalized_location} looking for partner")
 
     deduped = []
     seen = set()
@@ -278,7 +383,7 @@ def generate_high_intent_queries(
     while len(deduped) < min_queries:
         fallback = _compact_query([
             industries[0],
-            primary_service,
+            service_category,
             normalized_location,
             f"buyer intent company query {len(deduped) + 1}",
         ], max_len=220).strip().lower()
@@ -289,7 +394,7 @@ def generate_high_intent_queries(
             break
 
     # Debug logging
-    print(f"{log_prefix} Type: BUYER | Industry: {','.join(industries)} | Service: {primary_service} | Location: {normalized_location}")
+    print(f"{log_prefix} Type: BUYER | Industry: {','.join(industries)} | Service: {service_category} | Location: {normalized_location}")
     for i, q in enumerate(deduped[:5], 1):
         print(f"{log_prefix} Query {i}: {q}")
     
@@ -971,12 +1076,14 @@ def analyze_business_signals(
     - signals: list of detected signals (hiring, scaling, saas_platform, tech_heavy, funding)
     - confidence: 0-1 composite score from signal strength + semantic hints
     - tech_relevance: 0-1 score for technical relevance to service focus
+    - seller_marketing_score: 0-1 score for vendor/seller marketing language
+    - is_seller_intent: True when text strongly indicates provider-side marketing copy
     - reason: list of reason strings explaining the signals
     """
     snippet_text = (snippet or "").lower()
     website_summary = (website_text or "").lower()
-    query_text = (search_query or "").lower()
-    searchable = f"{snippet_text} {website_summary} {query_text}".strip()
+    content_text = f"{snippet_text} {website_summary}".strip()
+    searchable = content_text
 
     # === SIGNAL DEFINITIONS ===
     rule_map = {
@@ -1066,6 +1173,77 @@ def analyze_business_signals(
     if any(t in searchable for t in anti_indicators):
         semantic_hint -= 0.20
 
+    # Seller-side marketing indicators: pages trying to sell services to visitors.
+    seller_marketing_phrases = [
+        "we provide",
+        "we offer",
+        "our services",
+        "our solutions",
+        "hire us",
+        "contact us",
+        "contact us today",
+        "request a quote",
+        "get quote",
+        "book a demo",
+        "schedule a call",
+        "if you're looking for",
+        "if you are looking for",
+        "you are at the right place",
+        "at the right place",
+        "submit rfp",
+        "attach your rfp",
+    ]
+    seller_service_phrases = [
+        "web development",
+        "software development",
+        "app development",
+        "mobile app development",
+        "development services",
+        "it consulting",
+        "digital transformation consulting",
+        "staff augmentation",
+        "outsourcing",
+        "dynamics 365",
+        "power apps",
+        "erp implementation",
+    ]
+
+    seller_marketing_hits = [phrase for phrase in seller_marketing_phrases if phrase in searchable]
+    seller_service_hits = [phrase for phrase in seller_service_phrases if phrase in searchable]
+
+    seller_marketing_score = 0.0
+    if seller_marketing_hits:
+        seller_marketing_score += 0.30
+    if seller_service_hits:
+        seller_marketing_score += min(0.30, 0.12 * len(set(seller_service_hits)))
+
+    if re.search(r"\b(if|when)\s+you\s+(need|require|are looking for|looking for)\b", searchable):
+        seller_marketing_score += 0.20
+    if re.search(r"\b(we|our team)\s+(offer|provide|deliver)\b", searchable):
+        seller_marketing_score += 0.18
+
+    # Procurement/tender language can indicate buyer-side pages; reduce over-penalization.
+    strict_procurement_tokens = [
+        "invites bids",
+        "issued by",
+        "bid submission",
+        "tender notice",
+        "expression of interest",
+        "proposal due",
+        "request for quotation",
+        "rfq",
+        "request for information",
+        "rfi",
+    ]
+    if any(token in searchable for token in strict_procurement_tokens):
+        seller_marketing_score = max(0.0, seller_marketing_score - 0.20)
+
+    if seller_marketing_score > 0.0:
+        semantic_hint -= min(0.45, seller_marketing_score)
+        reasons.append(
+            f"seller intent markers via: {', '.join((seller_marketing_hits + seller_service_hits)[:3])}"
+        )
+
     # === FINAL CONFIDENCE CALCULATION ===
     confidence = max(0.0, min(1.0, strength + semantic_hint))
     
@@ -1073,6 +1251,8 @@ def analyze_business_signals(
         "signals": sorted(set(detected)),
         "confidence": confidence,
         "tech_relevance": max(0.0, min(1.0, tech_relevance)),
+        "seller_marketing_score": max(0.0, min(1.0, seller_marketing_score)),
+        "is_seller_intent": seller_marketing_score >= 0.45,
         "reason": reasons,
     }
 
@@ -1598,6 +1778,13 @@ async def discover_company_websites(
             print(
                 "[QUERY GENERATION: LLM] "
                 f"Rejected: {candidate_text[:100] if candidate_text else candidate}"
+            )
+            continue
+        if not _is_service_scoped_planned_query(candidate_text, service_focus=service_focus):
+            rejected_planned_queries += 1
+            print(
+                "[QUERY GENERATION: LLM] "
+                f"Rejected(service_scope): {candidate_text[:100] if candidate_text else candidate}"
             )
             continue
 

@@ -20,6 +20,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
+# Quick win: Indeed consistently returns empty/blocked HTML in current flow.
+# Keep disabled until Playwright/Apify (or equivalent) is implemented.
+INDEED_ENABLED = False
+
 
 class JobBoardService:
     """Discover high-intent buyer companies via web intent signals."""
@@ -99,30 +103,41 @@ class JobBoardService:
         if not normalized_service:
             return []
 
-        service_lower = normalized_service.lower()
         service_category = normalized_service
-        if "dynamics" in service_lower or "erp" in service_lower:
-            service_category = "ERP implementation"
-        elif "web" in service_lower or "website" in service_lower:
+        service_lower = service_category.lower()
+        if "web" in service_lower or "website" in service_lower:
             service_category = "web development"
+        elif "dynamics" in service_lower or "erp" in service_lower:
+            service_category = "ERP implementation"
 
-        keywords: List[str] = [
-            f"companies in {normalized_location} need {service_category}",
-            f"{normalized_location} startups looking for {service_category} partner",
-            f"{service_category} vendor selection {normalized_location}",
-            f"{service_category} request for proposal {normalized_location}",
-            f"site:linkedin.com/company {normalized_location} cto it manager",
-            f"top manufacturing companies in {normalized_location}",
-            f"funded startups {normalized_location}",
+        industry = "technology"
+        if any(token in service_lower for token in ["web", "app", "software", ".net", "node", "react"]):
+            industry = "saas"
+        elif any(token in service_lower for token in ["erp", "dynamics", "sap", "oracle"]):
+            industry = "manufacturing"
+
+        buyer_intent_templates = [
+            "{location} company needs {service}",
+            "{location} {service} outsourcing",
+            "{industry} digital transformation {location}",
+            "{location} SMB {service} vendor",
+            "top companies {location} IT budget",
+        ]
+        company_discovery_templates = [
+            "manufacturing companies {location}",
+            "retail chains {location}",
+            "funded startups {location} 2024",
+            "ecommerce companies {location}",
         ]
 
-        if "dynamics" in service_lower or "erp" in service_lower:
-            keywords.extend(
-                [
-                    f"{normalized_location} companies using SAP OR Oracle ERP",
-                    f"{normalized_location} ERP modernization projects",
-                    f"{normalized_location} manufacturing company IT requirements",
-                ]
+        keywords: List[str] = []
+        for template in buyer_intent_templates + company_discovery_templates:
+            keywords.append(
+                template.format(
+                    location=normalized_location,
+                    service=service_category,
+                    industry=industry,
+                )
             )
 
         deduped: List[str] = []
@@ -133,7 +148,7 @@ class JobBoardService:
                 continue
             seen.add(key)
             deduped.append(item)
-        return deduped[:8]
+        return deduped[:10]
 
     @staticmethod
     def _extract_domain(url_or_host: str) -> str:
@@ -1183,6 +1198,9 @@ class JobBoardService:
         return jobs
 
     async def _scrape_indeed(self, session: aiohttp.ClientSession, keyword: str, location: str) -> List[Dict[str, Any]]:
+        if not INDEED_ENABLED:
+            print("[JOBBOARD] Indeed disabled - returns 0 HTML (bot blocked). Enable after adding Playwright/Apify.")
+            return []
         url = f"https://in.indeed.com/jobs?q={quote_plus(keyword)}&l={quote_plus(location)}&fromage=14"
         print(f"[JOBBOARD] Fetching Indeed URL: {url}")
         html = await self._fetch_html(session, url)
@@ -1227,8 +1245,10 @@ class JobBoardService:
             print(f"[JOBBOARD] Skipping scrape: empty service or location")
             return []
 
-        enable_indeed = bool(settings.JOBBOARD_ENABLE_INDEED)
+        enable_indeed = bool(settings.JOBBOARD_ENABLE_INDEED) and INDEED_ENABLED
         enable_naukri = bool(settings.JOBBOARD_ENABLE_NAUKRI)
+        if bool(settings.JOBBOARD_ENABLE_INDEED) and not INDEED_ENABLED:
+            print("[JOBBOARD] Indeed disabled - returns 0 HTML (bot blocked). Enable after adding Playwright/Apify.")
         if not enable_indeed and not enable_naukri:
             print("[JOBBOARD] Indeed/Naukri scraping disabled by config.")
             return []
