@@ -1,6 +1,7 @@
 """
 AI router for advanced AI operations
 """
+import re
 from fastapi import APIRouter, HTTPException, status, Header
 from typing import List, Dict, Any, Optional
 
@@ -148,4 +149,186 @@ async def create_embeddings(
         "campaign_id": campaign_id,
         "embeddings_created": count,
         "message": f"Created {count} embeddings for campaign"
+    }
+
+@router.post("/insights")
+async def generate_insights(
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Generate AI insights from all leads using Groq Qwen model
+    Provides actionable recommendations based on lead data
+    """
+    from app.services.llm_provider import groq_provider
+    from app.config import settings
+    
+    current_user = get_current_user_from_token(authorization)
+    
+    # Fetch user's campaigns
+    campaigns = list(Campaign.objects(owner_id=current_user.id))
+    campaign_ids = [str(c.id) for c in campaigns]
+    
+    print(f"[AI INSIGHTS] User: {current_user.email}, Campaigns: {len(campaigns)}, Campaign IDs: {campaign_ids}")
+    
+    # Fetch leads - try both by campaign and all leads if no campaigns
+    if campaign_ids:
+        leads = list(Lead.objects(campaign_id__in=campaign_ids))
+    else:
+        # Fallback: get all leads if no campaigns
+        leads = list(Lead.objects())
+    
+    print(f"[AI INSIGHTS] Found {len(leads)} leads")
+    
+    if not leads:
+        return {
+            "insights": "No lead data available yet. Start a lead search to generate insights.",
+            "recommendations": [],
+            "metrics": {
+                "total_leads": 0,
+                "hot_leads": 0,
+                "conversion_rate": 0,
+            }
+        }
+    
+    # Calculate metrics
+    hot_count = 0
+    for lead in leads:
+        if lead.score and isinstance(lead.score, dict):
+            if lead.score.get("is_hot_lead"):
+                hot_count += 1
+        elif hasattr(lead, 'score') and hasattr(lead.score, 'get'):
+            if lead.score.get("is_hot_lead"):
+                hot_count += 1
+    
+    contacted = 0
+    for lead in leads:
+        if lead.message_sent or (lead.status and lead.status in ["contacted", "replied", "converted"]):
+            contacted += 1
+    
+    converted = 0
+    for lead in leads:
+        if lead.converted or (lead.status and lead.status == "converted"):
+            converted += 1
+    
+    conversion_rate = (converted / contacted * 100) if contacted > 0 else 0
+    
+    # Group by industry
+    industries = {}
+    for lead in leads:
+        ind = lead.industry or "Unknown"
+        industries[ind] = industries.get(ind, 0) + 1
+    
+    top_industries = sorted(industries.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    # Group by status
+    statuses = {}
+    for lead in leads:
+        status = lead.status or "new"
+        statuses[status] = statuses.get(status, 0) + 1
+    
+    print(f"[AI INSIGHTS] Hot: {hot_count}, Contacted: {contacted}, Converted: {converted}")
+    
+    # Generate insights using Groq Qwen
+    if not groq_provider.client:
+        print("[AI INSIGHTS] Groq client not configured")
+        return {
+            "insights": "AI provider not configured. Please add GROQ_API_KEY to generate insights.",
+            "recommendations": [],
+            "metrics": {
+                "total_leads": len(leads),
+                "hot_leads": hot_count,
+                "conversion_rate": conversion_rate,
+            }
+        }
+    
+    summary = f"""Lead Intelligence Summary:
+- Total Leads: {len(leads)}
+- Hot Leads: {hot_count}
+- Conversion Rate: {conversion_rate:.1f}%
+- Top Industries: {', '.join([f"{ind} ({count})" for ind, count in top_industries])}
+- Lead Status Distribution: {', '.join([f"{s}: {c}" for s, c in statuses.items()])}"""
+    
+    prompt = f"""Based on this lead data summary, provide actionable AI insights and recommendations:
+
+{summary}
+
+Please provide:
+1. Key insights about the current lead quality and conversion patterns
+2. 3-5 specific recommendations to improve lead quality and conversion rate
+3. Industry trends and opportunities
+4. Next steps for the user
+
+Keep insights practical and actionable."""
+    
+    try:
+        print("[AI INSIGHTS] Calling Groq API...")
+        insights_text = await groq_provider.call_chat_completion(
+            system_prompt="You are an expert sales intelligence analyst. Provide data-driven insights and recommendations.",
+            user_prompt=prompt,
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        print(f"[AI INSIGHTS] Got response: {len(insights_text)} chars")
+    except Exception as e:
+        print(f"[AI INSIGHTS] Groq error: {str(e)}")
+        insights_text = f"Could not generate insights: {str(e)}"
+    
+    # Clean up response - remove <think> tags and thinking process
+    import re
+    insights_text = re.sub(r'<think>.*?</think>', '', insights_text, flags=re.DOTALL)
+    insights_text = insights_text.strip()
+    
+    # Remove leading thinking artifacts
+    if insights_text.startswith("Okay"):
+        # Find where actual content starts (after thinking)
+        lines = insights_text.split('\n')
+        clean_lines = []
+        for i, line in enumerate(lines):
+            if line.strip().startswith(('###', '#', '**', '1.', '2.', '3.', '-', '•', 'Key', 'Recommendation', 'Industry')):
+                clean_lines = lines[i:]
+                break
+        if clean_lines:
+            insights_text = '\n'.join(clean_lines).strip()
+    
+    # Parse recommendations more carefully
+    recommendations = []
+    lines = insights_text.split("\n")
+    in_recommendations = False
+    
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        
+        # Look for recommendations section
+        if "recommendation" in lower and (":" in line or i < len(lines) - 1):
+            in_recommendations = True
+            continue
+        
+        # Stop when hitting another major section
+        if in_recommendations and any(x in lower for x in ["industry trend", "next step", "final note"]):
+            in_recommendations = False
+        
+        # Extract recommendation lines
+        if in_recommendations and line.strip():
+            # Match numbered or bulleted items
+            match = re.match(r'^[\s]*[\d\.\-•*]+\s*\.?\s*(.+)', line)
+            if match:
+                rec_text = match.group(1).strip()
+                # Skip if it's a subsection header
+                if not rec_text.endswith(":") and len(rec_text) > 15:
+                    recommendations.append(rec_text)
+    
+    recommendations = recommendations[:5]
+    
+    return {
+        "insights": insights_text,
+        "recommendations": recommendations,
+        "metrics": {
+            "total_leads": len(leads),
+            "hot_leads": hot_count,
+            "conversion_rate": round(conversion_rate, 2),
+            "contacted": contacted,
+            "converted": converted,
+            "top_industries": [{"name": ind, "count": count} for ind, count in top_industries],
+        },
+        "model": settings.GROQ_MODEL,
     }

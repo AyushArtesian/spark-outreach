@@ -261,6 +261,13 @@ export const aiAPI = {
       requiresAuth: true,
     });
   },
+
+  generateInsights: async () => {
+    return apiCall("/ai/insights", {
+      method: "POST",
+      requiresAuth: true,
+    });
+  },
 };
 
 // Company API

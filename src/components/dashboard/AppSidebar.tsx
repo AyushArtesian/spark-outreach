@@ -12,6 +12,7 @@ const navItems = [
   { icon: Search, label: "Search Leads", path: "/search" },
   { icon: Users, label: "All Leads", path: "/all-leads" },
   { icon: Users, label: "Leads", path: "/leads" },
+  { icon: Sparkles, label: "AI Insights", path: "/ai-insights" },
   { icon: Beaker, label: "Test", path: "/test" },
   { icon: Settings, label: "Settings", path: "/settings" },
 ];

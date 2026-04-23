@@ -34,6 +34,7 @@ type LeadRecord = {
   signal_keywords?: string[];
   company_fit_score?: number;
   signal_score?: number;
+  raw_data?: Record<string, any>;
   score?: {
     total_score?: number;
     grade?: "A" | "B" | "C" | "D";
@@ -235,24 +236,50 @@ export default function LeadDashboard() {
   }, [leadsData]);
 
   const recentSearches = useMemo(() => {
-    const leadsByCampaign = leadsData.reduce<Record<string, number>>((acc, lead) => {
+    const leadsByCampaign = leadsData.reduce<Record<string, LeadRecord[]>>((acc, lead) => {
       const key = String(lead.campaign_id || "");
-      acc[key] = (acc[key] || 0) + 1;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(lead);
       return acc;
     }, {});
+
+    const extractLocationFromLeads = (campaignLeads: LeadRecord[]): string => {
+      if (campaignLeads.length === 0) return "Any location";
+      
+      // Try to extract locations from leads' raw_data or industry
+      const locations: Record<string, number> = {};
+      for (const lead of campaignLeads) {
+        // Check raw_data for location
+        const location = lead.raw_data?.location || lead.industry || "Unknown";
+        locations[location] = (locations[location] || 0) + 1;
+      }
+      
+      // Return most common location
+      const topLocation = Object.entries(locations)
+        .sort((a, b) => b[1] - a[1])[0]?.[0];
+      
+      return topLocation && topLocation !== "Unknown" ? topLocation : "Any location";
+    };
 
     const items = campaignsData
       .slice()
       .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
       .slice(0, 4)
       .map((campaign) => {
-        const location = campaign.target_locations?.[0] || "Any location";
+        const campaignLeads = leadsByCampaign[String(campaign.id)] || [];
+        
+        // First try campaign target_locations, then extract from leads
+        let location = campaign.target_locations?.[0] || "";
+        if (!location) {
+          location = extractLocationFromLeads(campaignLeads);
+        }
+        
         const service = campaign.services?.[0] || campaign.title;
         return {
           id: campaign.id,
           location,
           service,
-          leads: leadsByCampaign[String(campaign.id)] || 0,
+          leads: campaignLeads.length,
           date: formatRelativeTime(campaign.updated_at),
         };
       });
@@ -444,9 +471,9 @@ export default function LeadDashboard() {
                   {aiRecommendation}
                 </p>
               </div>
-              <Link to="/search">
+              <Link to="/ai-insights">
                 <Button variant="default" className="shrink-0 gap-1">
-                  View Matches <ArrowRight className="w-4 h-4" />
+                  View Insights <ArrowRight className="w-4 h-4" />
                 </Button>
               </Link>
             </div>
