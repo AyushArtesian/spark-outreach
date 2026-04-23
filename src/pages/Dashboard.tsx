@@ -6,6 +6,9 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianG
 import { Link } from "react-router-dom";
 import { campaignsAPI, leadsAPI } from "@/services/api";
 import { toast } from "@/hooks/use-toast";
+import LeadHealthFunnel from "@/components/dashboard/LeadHealthFunnel";
+import ActivityTimeline from "@/components/dashboard/ActivityTimeline";
+import { getAccountActivityEvents, logActivityEvent } from "@/lib/activityTimeline";
 
 type CampaignRecord = {
   id: string;
@@ -68,6 +71,7 @@ export default function DashboardPage() {
   const [leadsData, setLeadsData] = useState<LeadRecord[]>([]);
   const [hotLeads, setHotLeads] = useState<LeadRecord[]>([]);
   const [isLoadingDashboard, setIsLoadingDashboard] = useState(true);
+  const [accountTimeline, setAccountTimeline] = useState(getAccountActivityEvents(12));
 
   const fetchAllLeads = async (): Promise<LeadRecord[]> => {
     const pageSize = 200;
@@ -113,6 +117,7 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadDashboardData();
+    setAccountTimeline(getAccountActivityEvents(12));
   }, []);
 
   const pollScanStatus = async () => {
@@ -123,6 +128,12 @@ export default function DashboardPage() {
         setIsScanning(false);
         const summary = statusPayload?.summary || {};
         loadDashboardData();
+        logActivityEvent({
+          type: "system",
+          title: "Intent scan completed",
+          description: `Found ${summary.new_leads_found || 0} new leads and ${summary.hot_leads || 0} hot leads.`,
+        });
+        setAccountTimeline(getAccountActivityEvents(12));
         toast({
           title: "Intent scan complete",
           description: `Found ${summary.new_leads_found || 0} new leads (${summary.hot_leads || 0} hot).`,
@@ -156,6 +167,12 @@ export default function DashboardPage() {
       setScanId(String(payload?.scan_id || ""));
       setScanMessage(String(payload?.message || "Intent scan started"));
       setIsScanning(true);
+      logActivityEvent({
+        type: "system",
+        title: "Intent scan started",
+        description: `Scan ID: ${String(payload?.scan_id || "n/a")}`,
+      });
+      setAccountTimeline(getAccountActivityEvents(12));
       toast({
         title: "Scanning job boards",
         description: "Looking for new intent-rich leads.",
@@ -182,6 +199,15 @@ export default function DashboardPage() {
 
   const openedCount = useMemo(() => leadsData.filter((lead) => Boolean(lead.opened)).length, [leadsData]);
   const repliedCount = useMemo(() => leadsData.filter((lead) => Boolean(lead.replied)).length, [leadsData]);
+  const convertedCount = useMemo(
+    () =>
+      leadsData.filter((lead) => {
+        const status = String(lead.status || "").toLowerCase();
+        return status === "converted";
+      }).length,
+    [leadsData]
+  );
+  const newCount = useMemo(() => Math.max(0, leadsData.length - sentCount), [leadsData.length, sentCount]);
   const activeCampaignsCount = useMemo(
     () => campaignsData.filter((campaign) => String(campaign.status).toLowerCase() === "active").length,
     [campaignsData]
@@ -238,39 +264,59 @@ export default function DashboardPage() {
     return Object.values(bucketMap);
   }, [leadsData]);
 
-  const activities = useMemo(() => {
+  const derivedActivities = useMemo(() => {
     const sorted = [...leadsData].sort((a, b) => {
       const aTime = new Date(a.updated_at || a.created_at || 0).getTime();
       const bTime = new Date(b.updated_at || b.created_at || 0).getTime();
       return bTime - aTime;
     });
-
-    const mapped = sorted.slice(0, 5).map((lead) => {
+    return sorted.slice(0, 8).map((lead) => {
       const actor = lead.name || lead.company || "A lead";
-      let text = `${actor} was added as a new prospect`;
-      let color = "bg-primary";
-
       if (lead.replied) {
-        text = `${actor} replied to your outreach`;
-        color = "bg-success";
-      } else if (lead.opened) {
-        text = `${actor} opened your email`;
-        color = "bg-accent";
-      } else if (lead.message_sent || String(lead.status || "").toLowerCase() === "contacted") {
-        text = `Outreach sent to ${actor}`;
-        color = "bg-warning";
+        return {
+          id: `derived-reply-${lead.id}`,
+          timestamp: lead.updated_at || lead.created_at || new Date().toISOString(),
+          type: "reply" as const,
+          title: `${actor} replied to outreach`,
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        };
       }
-
+      if (lead.message_sent || String(lead.status || "").toLowerCase() === "contacted") {
+        return {
+          id: `derived-message-${lead.id}`,
+          timestamp: lead.updated_at || lead.created_at || new Date().toISOString(),
+          type: "message" as const,
+          title: `Message sent to ${actor}`,
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        };
+      }
       return {
-        text,
-        time: formatRelativeTime(lead.updated_at || lead.created_at),
-        color,
+        id: `derived-new-${lead.id}`,
+        timestamp: lead.created_at || new Date().toISOString(),
+        type: "system" as const,
+        title: `${actor} added as a new prospect`,
+        leadId: lead.id,
+        leadName: lead.name,
+        company: lead.company,
       };
     });
-
-    if (mapped.length > 0) return mapped;
-    return [{ text: "No live activity yet", time: "just now", color: "bg-muted" }];
   }, [leadsData]);
+
+  const combinedTimeline = useMemo(() => {
+    const merged = [...accountTimeline, ...derivedActivities];
+    const unique = new Map<string, (typeof merged)[number]>();
+    for (const event of merged) {
+      const key = `${event.type}:${event.leadId || "account"}:${event.title}:${event.timestamp}`;
+      if (!unique.has(key)) unique.set(key, event);
+    }
+    return Array.from(unique.values())
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 10);
+  }, [accountTimeline, derivedActivities]);
 
   const campaigns = useMemo(() => {
     return campaignsData.map((campaign) => {
@@ -359,6 +405,15 @@ export default function DashboardPage() {
         ))}
       </motion.div>
 
+      <LeadHealthFunnel
+        stages={[
+          { key: "new", label: "New", count: newCount, colorClass: "text-primary" },
+          { key: "contacted", label: "Contacted", count: sentCount, colorClass: "text-accent" },
+          { key: "replied", label: "Replied", count: repliedCount, colorClass: "text-warning" },
+          { key: "converted", label: "Converted", count: convertedCount, colorClass: "text-success" },
+        ]}
+      />
+
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Chart */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="lg:col-span-2 glass-card rounded-xl p-6">
@@ -381,20 +436,10 @@ export default function DashboardPage() {
           </div>
         </motion.div>
 
-        {/* Activity Feed */}
+        {/* Activity Timeline */}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }} className="glass-card rounded-xl p-6">
-          <h3 className="font-display font-semibold text-foreground mb-4">Recent Activity</h3>
-          <div className="space-y-4">
-            {activities.map((a, i) => (
-              <div key={i} className="flex items-start gap-3">
-                <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${a.color}`} />
-                <div>
-                  <p className="text-sm text-foreground">{a.text}</p>
-                  <p className="text-xs text-muted-foreground">{a.time}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+          <h3 className="font-display font-semibold text-foreground mb-4">In-app Activity Timeline</h3>
+          <ActivityTimeline events={combinedTimeline} emptyMessage="No account activity yet." />
         </motion.div>
       </div>
 

@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
 import { aiAPI } from "@/services/api";
 import { toast } from "@/hooks/use-toast";
+import LeadHealthFunnel from "@/components/dashboard/LeadHealthFunnel";
+import { logActivityEvent } from "@/lib/activityTimeline";
 
 interface InsightsData {
   insights: string;
@@ -15,6 +17,7 @@ interface InsightsData {
     hot_leads: number;
     conversion_rate: number;
     contacted?: number;
+    replied?: number;
     converted?: number;
     top_industries?: Array<{ name: string; count: number }>;
   };
@@ -35,6 +38,11 @@ export default function AIInsights() {
     try {
       const result = await aiAPI.generateInsights();
       setData(result);
+      logActivityEvent({
+        type: "ai_recommendation",
+        title: "AI insights generated",
+        description: `${result?.recommendations?.length || 0} recommendations produced`,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to generate insights";
       setError(message);
@@ -92,6 +100,24 @@ export default function AIInsights() {
         </div>
       ) : data ? (
         <motion.div variants={container} initial="hidden" animate="show" className="space-y-6">
+          <motion.div variants={item}>
+            <LeadHealthFunnel
+              title="Lead Health Funnel"
+              subtitle="How your account is progressing from first touch to conversion"
+              stages={[
+                {
+                  key: "new",
+                  label: "New",
+                  count: Math.max(0, (data.metrics.total_leads || 0) - (data.metrics.contacted || 0)),
+                  colorClass: "text-primary",
+                },
+                { key: "contacted", label: "Contacted", count: data.metrics.contacted || 0, colorClass: "text-accent" },
+                { key: "replied", label: "Replied", count: data.metrics.replied || 0, colorClass: "text-warning" },
+                { key: "converted", label: "Converted", count: data.metrics.converted || 0, colorClass: "text-success" },
+              ]}
+            />
+          </motion.div>
+
           {/* Key Metrics */}
           <motion.div variants={item}>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">

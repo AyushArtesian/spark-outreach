@@ -19,6 +19,8 @@ import AIInsights from "./pages/AIInsights";
 import TestDashboard from "./pages/TestDashboard";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import CampaignsPage from "./pages/Campaigns";
+import NewCampaignPage from "./pages/NewCampaign";
 
 const queryClient = new QueryClient();
 
@@ -56,6 +58,8 @@ const AppRoutes = () => (
       <Route path="/leads" element={<LeadResults />} />
       <Route path="/lead/:id" element={<LeadDetail />} />
       <Route path="/ai-insights" element={<AIInsights />} />
+      <Route path="/campaigns" element={<CampaignsPage />} />
+      <Route path="/campaigns/new" element={<NewCampaignPage />} />
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="/test" element={<TestDashboard />} />
     </Route>

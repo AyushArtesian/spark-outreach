@@ -25,6 +25,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { toast } from "@/hooks/use-toast";
 import { leadsAPI } from "@/services/api";
+import ActivityTimeline from "@/components/dashboard/ActivityTimeline";
+import { ActivityEvent, getLeadActivityEvents, logActivityEvent } from "@/lib/activityTimeline";
 
 interface GeneratedEmail {
   subject: string;
@@ -70,6 +72,9 @@ interface LeadDetail {
   industry?: string;
   status?: string;
   created_at?: string;
+  updated_at?: string;
+  contacted_at?: string;
+  replied_at?: string;
   company_fit_score?: number;
   signal_score?: number;
   reason?: string[];
@@ -119,11 +124,6 @@ const GRADE_STYLES: Record<string, string> = {
   C: "bg-[#e76f51] text-white",
   D: "bg-[#6c757d] text-white",
 };
-
-const placeholderTimeline = [
-  { date: "Discovered", event: "Lead discovered and added to the pipeline", type: "system" },
-  { date: "Score calculated", event: "Lead scored using company fit and growth signals", type: "system" },
-];
 
 export default function LeadDetail() {
   const { id } = useParams<{ id: string }>();
@@ -185,6 +185,14 @@ export default function LeadDetail() {
       const email = (await leadsAPI.generateEmail(id)) as GeneratedEmail;
       setGeneratedEmail(email);
       setEmailModalOpen(true);
+      logActivityEvent({
+        type: "follow_up",
+        title: `Cold email generated for ${lead?.company || lead?.name || "lead"}`,
+        description: `Email type: ${email.email_type}`,
+        leadId: id,
+        leadName: lead?.name,
+        company: lead?.company,
+      });
       toast({ title: "Cold email generated" });
       await fetchLead();
     } catch (err: any) {
@@ -252,6 +260,78 @@ export default function LeadDetail() {
   const summary = lead.raw_data?.company_summary || lead.raw_data?.snippet || lead.job_title || "No summary available.";
   const signals = lead.signal_keywords?.length ? lead.signal_keywords : lead.raw_data?.discovery_signals || [];
   const reasonList = lead.reason?.length ? lead.reason : lead.raw_data?.final_reason || ["Qualified by scoring and signal analysis."];
+  const localEvents = getLeadActivityEvents(lead.id, 20);
+  const derivedTimeline: ActivityEvent[] = [];
+
+  if (lead.created_at) {
+    derivedTimeline.push({
+      id: "derived-created",
+      timestamp: lead.created_at,
+      type: "system",
+      title: "Lead discovered",
+      description: "Lead was added to your pipeline.",
+      leadId: lead.id,
+      leadName: lead.name,
+      company: lead.company,
+    });
+  }
+
+  if (lead.contacted_at || String(lead.status || "").toLowerCase() === "contacted") {
+    derivedTimeline.push({
+      id: "derived-contacted",
+      timestamp: lead.contacted_at || lead.updated_at || new Date().toISOString(),
+      type: "message",
+      title: "Lead contacted",
+      description: "Outbound message has been sent.",
+      leadId: lead.id,
+      leadName: lead.name,
+      company: lead.company,
+    });
+  }
+
+  if (lead.replied_at || String(lead.status || "").toLowerCase() === "replied") {
+    derivedTimeline.push({
+      id: "derived-replied",
+      timestamp: lead.replied_at || lead.updated_at || new Date().toISOString(),
+      type: "reply",
+      title: "Lead replied",
+      description: "Inbound response was recorded.",
+      leadId: lead.id,
+      leadName: lead.name,
+      company: lead.company,
+    });
+  }
+
+  if (lead.enrichment) {
+    derivedTimeline.push({
+      id: "derived-enriched",
+      timestamp: lead.updated_at || new Date().toISOString(),
+      type: "enrichment",
+      title: "Lead profile enriched",
+      description: "Signals and score breakdown were updated.",
+      leadId: lead.id,
+      leadName: lead.name,
+      company: lead.company,
+    });
+  }
+
+  (lead.emails || []).forEach((email, idx) => {
+    if (!email.generated_at) return;
+    derivedTimeline.push({
+      id: `derived-email-${idx}`,
+      timestamp: email.generated_at,
+      type: "follow_up",
+      title: `AI email generated (${email.email_type})`,
+      description: email.subject,
+      leadId: lead.id,
+      leadName: lead.name,
+      company: lead.company,
+    });
+  });
+
+  const timelineEvents = [...localEvents, ...derivedTimeline]
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 20);
 
   const outreachMessage = `Hi ${lead.name ? lead.name.split(" ")[0] : "there"},\n\nI noticed ${companyName} is showing active demand in ${industry}. We support teams like yours with targeted execution and faster delivery across product and engineering workflows.\n\nOpen to a short 15-minute conversation this week?\n\nBest,\nYour Team`;
 
@@ -487,20 +567,7 @@ export default function LeadDetail() {
                 <CardTitle className="text-base font-display">Activity Timeline</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="space-y-4">
-                  {placeholderTimeline.map((t, i) => (
-                    <div key={i} className="flex gap-3">
-                      <div className="flex flex-col items-center">
-                        <div className={`w-2 h-2 rounded-full mt-1.5 ${t.type === "signal" ? "bg-warning" : "bg-primary"}`} />
-                        {i < placeholderTimeline.length - 1 && <div className="w-px flex-1 bg-border mt-1" />}
-                      </div>
-                      <div>
-                        <p className="text-sm text-foreground">{t.event}</p>
-                        <p className="text-xs text-muted-foreground">{t.date}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <ActivityTimeline events={timelineEvents} emptyMessage="No timeline events recorded for this lead yet." />
               </CardContent>
             </Card>
           </motion.div>

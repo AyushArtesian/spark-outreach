@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { useAuth } from "@/contexts/AuthContext";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/dashboard" },
@@ -20,6 +21,17 @@ const navItems = [
 export default function AppSidebar() {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const { user } = useAuth();
+
+  const userName = user?.full_name?.trim() || user?.username || "User";
+  const userEmail = user?.email || "";
+  const initials = userName
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2) || "U";
 
   return (
     <motion.aside
@@ -63,12 +75,12 @@ export default function AppSidebar() {
       <div className="p-3 border-t border-border/50">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full gradient-primary flex items-center justify-center text-xs font-bold text-primary-foreground shrink-0">
-            JD
+            {initials}
           </div>
           {!collapsed && (
             <div className="overflow-hidden">
-              <div className="text-sm font-medium text-foreground truncate">John Doe</div>
-              <div className="text-xs text-muted-foreground truncate">john@acmesoftware.com</div>
+              <div className="text-sm font-medium text-foreground truncate">{userName}</div>
+              <div className="text-xs text-muted-foreground truncate">{userEmail}</div>
             </div>
           )}
         </div>

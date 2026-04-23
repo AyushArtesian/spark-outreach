@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, MapPin, Briefcase, Building2, Users, Sparkles, Check, Loader2, ArrowRight, Brain, Radar, Target, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { useNavigate } from "react-router-dom";
 import { leadsAPI } from "@/services/api";
 import { toast } from "@/hooks/use-toast";
+import { logActivityEvent } from "@/lib/activityTimeline";
 
 const serviceOptions = [
   // Software Development
@@ -74,6 +75,19 @@ const processingSteps = [
   { icon: Sparkles, label: "Scoring and ranking leads", duration: 1000 },
 ];
 
+interface SavedSearchView {
+  id: string;
+  name: string;
+  isDefault?: boolean;
+  location: string;
+  selectedServices: string[];
+  selectedIndustry: string;
+  selectedSizes: string[];
+}
+
+const SAVED_SEARCH_VIEWS_KEY = "lead_search_saved_views_v1";
+const DEFAULT_SEARCH_VIEW_KEY = "lead_search_default_view_id_v1";
+
 export default function LeadSearch() {
   const navigate = useNavigate();
   const [location, setLocation] = useState("");
@@ -83,9 +97,142 @@ export default function LeadSearch() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+  const [savedViews, setSavedViews] = useState<SavedSearchView[]>([]);
+  const [viewName, setViewName] = useState("");
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [defaultViewId, setDefaultViewId] = useState<string | null>(null);
+  const [defaultApplied, setDefaultApplied] = useState(false);
 
   const toggleService = (s: string) => setSelectedServices((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
   const toggleSize = (s: string) => setSelectedSizes((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SAVED_SEARCH_VIEWS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) {
+        setSavedViews(parsed);
+      }
+      const savedDefaultId = localStorage.getItem(DEFAULT_SEARCH_VIEW_KEY);
+      if (savedDefaultId) {
+        setDefaultViewId(savedDefaultId);
+      }
+    } catch {
+      setSavedViews([]);
+      setDefaultViewId(null);
+    }
+  }, []);
+
+  const persistViews = (next: SavedSearchView[]) => {
+    setSavedViews(next);
+    localStorage.setItem(SAVED_SEARCH_VIEWS_KEY, JSON.stringify(next));
+  };
+
+  const saveCurrentView = () => {
+    const name = viewName.trim();
+    if (!name) {
+      toast({
+        title: "Name required",
+        description: "Enter a view name before saving.",
+      });
+      return;
+    }
+
+    if (!location || selectedServices.length === 0) {
+      toast({
+        title: "Not enough filters",
+        description: "Add at least location and one service before saving.",
+      });
+      return;
+    }
+
+    const snapshot: SavedSearchView = {
+      id: activeViewId || `search_view_${Date.now()}`,
+      name,
+      location,
+      selectedServices,
+      selectedIndustry,
+      selectedSizes,
+    };
+
+    const existingByName = savedViews.find((view) => view.name.toLowerCase() === name.toLowerCase());
+    let next: SavedSearchView[];
+    if (activeViewId) {
+      next = savedViews.map((view) => (view.id === activeViewId ? snapshot : view));
+    } else if (existingByName) {
+      snapshot.id = existingByName.id;
+      next = savedViews.map((view) => (view.id === existingByName.id ? snapshot : view));
+    } else {
+      next = [snapshot, ...savedViews].slice(0, 12);
+    }
+
+    persistViews(next);
+    setActiveViewId(snapshot.id);
+    setViewName(snapshot.name);
+    toast({
+      title: "Search view saved",
+      description: `"${snapshot.name}" is ready to reuse.`,
+    });
+  };
+
+  const applyView = (view: SavedSearchView) => {
+    setLocation(view.location);
+    setSelectedServices(view.selectedServices || []);
+    setSelectedIndustry(view.selectedIndustry || "All");
+    setSelectedSizes(view.selectedSizes || []);
+    setActiveViewId(view.id);
+    setViewName(view.name);
+  };
+
+  useEffect(() => {
+    if (defaultApplied) return;
+    if (!defaultViewId) {
+      setDefaultApplied(true);
+      return;
+    }
+    const defaultView = savedViews.find((view) => view.id === defaultViewId);
+    if (!defaultView) {
+      localStorage.removeItem(DEFAULT_SEARCH_VIEW_KEY);
+      setDefaultViewId(null);
+      setDefaultApplied(true);
+      return;
+    }
+    applyView(defaultView);
+    setDefaultApplied(true);
+  }, [defaultApplied, defaultViewId, savedViews]);
+
+  const toggleDefaultView = (id: string) => {
+    if (defaultViewId === id) {
+      localStorage.removeItem(DEFAULT_SEARCH_VIEW_KEY);
+      setDefaultViewId(null);
+      toast({
+        title: "Default cleared",
+        description: "This search view will no longer auto-load.",
+      });
+      return;
+    }
+
+    localStorage.setItem(DEFAULT_SEARCH_VIEW_KEY, id);
+    setDefaultViewId(id);
+    const selected = savedViews.find((view) => view.id === id);
+    toast({
+      title: "Default view set",
+      description: selected ? `"${selected.name}" will auto-load on page open.` : "Default view will auto-load.",
+    });
+  };
+
+  const deleteView = (id: string) => {
+    const next = savedViews.filter((view) => view.id !== id);
+    persistViews(next);
+    if (activeViewId === id) {
+      setActiveViewId(null);
+      setViewName("");
+    }
+    if (defaultViewId === id) {
+      localStorage.removeItem(DEFAULT_SEARCH_VIEW_KEY);
+      setDefaultViewId(null);
+    }
+  };
 
   const handleGenerate = async () => {
     setIsProcessing(true);
@@ -141,6 +288,11 @@ export default function LeadSearch() {
           // Store results in localStorage
           localStorage.setItem("searchResults", JSON.stringify(results));
           localStorage.setItem("searchQuery", query);
+          logActivityEvent({
+            type: "search",
+            title: "Lead search executed",
+            description: `${results.length || 0} leads for ${location} (${selectedIndustry})`,
+          });
 
           setTimeout(() => {
             setCompletedSteps((prev) => [...prev, 3]);
@@ -234,6 +386,61 @@ export default function LeadSearch() {
         <h1 className="text-2xl font-display font-bold text-foreground">Search Leads</h1>
         <p className="text-muted-foreground text-sm mt-1">Tell us where to look and what you're offering</p>
       </div>
+
+      <Card className="border-border/50 shadow-sm">
+        <CardHeader>
+          <CardTitle className="text-base font-display">Saved Search Views</CardTitle>
+          <CardDescription>Reuse common search setups instantly</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Input
+              placeholder="Save current setup as..."
+              value={viewName}
+              onChange={(e) => setViewName(e.target.value)}
+              className="sm:max-w-xs"
+            />
+            <Button variant="outline" onClick={saveCurrentView}>
+              {activeViewId ? "Update View" : "Save View"}
+            </Button>
+          </div>
+          {savedViews.length > 0 ? (
+            <div className="flex flex-wrap gap-2">
+              {savedViews.map((view) => (
+                <div key={view.id} className="flex items-center gap-1 rounded-full border border-border/60 px-2 py-1">
+                  <button
+                    type="button"
+                    onClick={() => applyView(view)}
+                    className={`text-xs font-medium ${
+                      activeViewId === view.id ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {view.name}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => toggleDefaultView(view.id)}
+                    className={`text-xs ${defaultViewId === view.id ? "text-warning" : "text-muted-foreground hover:text-warning"}`}
+                    aria-label={defaultViewId === view.id ? `Unset default view ${view.name}` : `Set default view ${view.name}`}
+                  >
+                    {defaultViewId === view.id ? "★" : "☆"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteView(view.id)}
+                    className="text-xs text-muted-foreground hover:text-destructive"
+                    aria-label={`Delete view ${view.name}`}
+                  >
+                    x
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">No saved search views yet.</p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Location */}
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>

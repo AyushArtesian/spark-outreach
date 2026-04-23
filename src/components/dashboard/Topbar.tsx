@@ -2,18 +2,26 @@ import { Search, Bell, Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/ThemeProvider";
 
-export default function Topbar() {
+interface TopbarProps {
+  onOpenCommandBar: () => void;
+}
+
+export default function Topbar({ onOpenCommandBar }: TopbarProps) {
   const { theme, toggle } = useTheme();
 
   return (
     <header className="h-14 border-b border-border/50 flex items-center justify-between px-6 bg-card/30 backdrop-blur-xl sticky top-0 z-40">
-      <div className="relative w-64">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-        <input
-          placeholder="Search leads, companies..."
-          className="w-full h-9 pl-9 pr-4 rounded-lg bg-muted/50 border border-border/50 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
-        />
-      </div>
+      <button
+        type="button"
+        onClick={onOpenCommandBar}
+        className="w-64 h-9 rounded-lg bg-muted/50 border border-border/50 px-3 text-sm text-muted-foreground flex items-center justify-between hover:border-primary/30 transition-colors"
+      >
+        <span className="flex items-center gap-2">
+          <Search className="w-4 h-4" />
+          <span>Go to page or action...</span>
+        </span>
+        <span className="text-[11px] text-muted-foreground border border-border rounded px-1.5 py-0.5">Ctrl/Cmd + K</span>
+      </button>
       <div className="flex items-center gap-2">
         <Button variant="ghost" size="icon" onClick={toggle}>
           {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}

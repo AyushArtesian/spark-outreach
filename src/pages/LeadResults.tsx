@@ -7,6 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Link } from "react-router-dom";
 import { toast } from "@/hooks/use-toast";
+import { leadsAPI } from "@/services/api";
+import LeadActionPanel, { SmartLeadAction } from "@/components/dashboard/LeadActionPanel";
+import { logActivityEvent } from "@/lib/activityTimeline";
 
 interface Lead {
   id: string;
@@ -47,6 +50,7 @@ export default function LeadResults() {
   const [filterStatus, setFilterStatus] = useState("All");
   const [sortBy, setSortBy] = useState("score");
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     // Load search results from localStorage
@@ -117,6 +121,139 @@ export default function LeadResults() {
       title: "Copied!",
       description: "Email copied to clipboard",
     });
+  };
+
+  const recommendedActionForLead = (lead: Lead): SmartLeadAction => {
+    const score = getQualityScore(lead);
+    const status = String(lead.status || "").toLowerCase();
+    if (!lead.industry || (lead.signal_keywords || []).length === 0) return "enrich_profile";
+    if (status === "new" && score >= 7) return "send_message";
+    if (status === "contacted" || status === "replied") return "follow_up";
+    if (score <= 3.5) return "not_fit";
+    return "send_message";
+  };
+
+  const patchLead = (leadId: string, patch: Partial<Lead>) => {
+    setLeads((prev) => prev.map((item) => (item.id === leadId ? { ...item, ...patch } : item)));
+  };
+
+  const runLeadAction = async (lead: Lead, action: SmartLeadAction) => {
+    const key = `${lead.id}:${action}`;
+    setActionLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      if (action === "send_message") {
+        const updated = await leadsAPI.contact(lead.id);
+        patchLead(lead.id, {
+          status: String(updated?.status || "contacted"),
+        });
+        toast({
+          title: "Message generated",
+          description: `${lead.company || lead.name} marked as contacted.`,
+        });
+        logActivityEvent({
+          type: "message",
+          title: `Message sent to ${lead.company || lead.name}`,
+          description: "Smart Action Panel: Send message",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+        logActivityEvent({
+          type: "status",
+          title: `${lead.company || lead.name} status changed`,
+          description: "Status updated to contacted",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "follow_up") {
+        await leadsAPI.generateEmail(lead.id);
+        if (String(lead.status || "").toLowerCase() === "new") {
+          await leadsAPI.update(lead.id, { status: "contacted" });
+          patchLead(lead.id, { status: "contacted" });
+          logActivityEvent({
+            type: "status",
+            title: `${lead.company || lead.name} status changed`,
+            description: "Status updated to contacted",
+            leadId: lead.id,
+            leadName: lead.name,
+            company: lead.company,
+          });
+        }
+        toast({
+          title: "Follow-up ready",
+          description: `Follow-up email generated for ${lead.company || lead.name}.`,
+        });
+        logActivityEvent({
+          type: "follow_up",
+          title: `Follow-up generated for ${lead.company || lead.name}`,
+          description: "Smart Action Panel: Follow up",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "enrich_profile") {
+        const enriched = await leadsAPI.enrich(lead.id);
+        patchLead(lead.id, {
+          industry: enriched?.industry ?? lead.industry,
+          signal_keywords: enriched?.signal_keywords ?? lead.signal_keywords,
+          signal_score: enriched?.signal_score ?? lead.signal_score,
+          company_fit_score: enriched?.company_fit_score ?? lead.company_fit_score,
+          status: enriched?.status ?? lead.status,
+        });
+        toast({
+          title: "Profile enriched",
+          description: `${lead.company || lead.name} enriched and re-scored.`,
+        });
+        logActivityEvent({
+          type: "enrichment",
+          title: `Lead enriched: ${lead.company || lead.name}`,
+          description: "Profile data and score refreshed",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "not_fit") {
+        await leadsAPI.update(lead.id, {
+          status: "rejected",
+          ai_notes: "Marked not a fit via Smart Action Panel",
+        });
+        patchLead(lead.id, { status: "rejected" });
+        toast({
+          title: "Marked as not a fit",
+          description: `${lead.company || lead.name} moved to rejected.`,
+        });
+        logActivityEvent({
+          type: "status",
+          title: `${lead.company || lead.name} marked not a fit`,
+          description: "Status changed to rejected",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+      logActivityEvent({
+        type: "ai_recommendation",
+        title: `AI recommendation applied on ${lead.company || lead.name}`,
+        description: `Action chosen: ${action.replace("_", " ")}`,
+        leadId: lead.id,
+        leadName: lead.name,
+        company: lead.company,
+      });
+    } catch (error: any) {
+      toast({
+        title: "Action failed",
+        description: error?.message || "Could not complete action. Please retry.",
+      });
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [key]: false }));
+    }
   };
 
   if (loading) {
@@ -260,6 +397,12 @@ export default function LeadResults() {
                             <p className="text-sm text-muted-foreground">No signals detected</p>
                           )}
                         </div>
+
+                        <LeadActionPanel
+                          recommendedAction={recommendedActionForLead(lead)}
+                          onAction={(action) => runLeadAction(lead, action)}
+                          isLoading={(action) => Boolean(actionLoading[`${lead.id}:${action}`])}
+                        />
                       </div>
 
                       {/* Right — Score + Actions */}

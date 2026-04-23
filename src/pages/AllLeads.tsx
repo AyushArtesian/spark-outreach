@@ -9,6 +9,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Link } from "react-router-dom";
 import { toast } from "@/hooks/use-toast";
 import { leadsAPI } from "@/services/api";
+import LeadActionPanel, { SmartLeadAction } from "@/components/dashboard/LeadActionPanel";
+import { logActivityEvent } from "@/lib/activityTimeline";
 
 interface LeadScore {
   total_score: number;
@@ -44,6 +46,22 @@ interface Lead {
   status: string;
   created_at: string;
 }
+
+interface SavedLeadView {
+  id: string;
+  name: string;
+  isDefault?: boolean;
+  filters: {
+    activeTab: string;
+    search: string;
+    filterPriority: string;
+    filterStatus: string;
+    sortBy: string;
+  };
+}
+
+const SAVED_VIEWS_KEY = "all_leads_saved_views_v1";
+const DEFAULT_VIEW_KEY = "all_leads_default_view_id_v1";
 
 const GRADE_STYLES: Record<string, string> = {
   A: "bg-[#2d6a4f] text-white",
@@ -96,6 +114,12 @@ export default function AllLeads() {
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
   const [sortBy, setSortBy] = useState("score");
+  const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
+  const [savedViews, setSavedViews] = useState<SavedLeadView[]>([]);
+  const [viewName, setViewName] = useState("");
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [defaultViewId, setDefaultViewId] = useState<string | null>(null);
+  const [defaultApplied, setDefaultApplied] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [skip, setSkip] = useState(0);
@@ -176,7 +200,36 @@ export default function AllLeads() {
   useEffect(() => {
     fetchLeads(0);
     fetchHotLeads();
+
+    try {
+      const raw = localStorage.getItem(SAVED_VIEWS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) {
+        setSavedViews(parsed);
+      }
+      const savedDefaultId = localStorage.getItem(DEFAULT_VIEW_KEY);
+      if (savedDefaultId) {
+        setDefaultViewId(savedDefaultId);
+      }
+    } catch {
+      setSavedViews([]);
+      setDefaultViewId(null);
+    }
   }, []);
+
+  useEffect(() => {
+    const matched = savedViews.find((view) => {
+      const f = view.filters;
+      return (
+        f.activeTab === activeTab &&
+        f.search === search &&
+        f.filterPriority === filterPriority &&
+        f.filterStatus === filterStatus &&
+        f.sortBy === sortBy
+      );
+    });
+    setActiveViewId(matched?.id || null);
+  }, [activeTab, filterPriority, filterStatus, savedViews, search, sortBy]);
 
   const handleLoadMore = () => {
     const nextSkip = skip + pageSize;
@@ -223,6 +276,261 @@ export default function AllLeads() {
     });
   };
 
+  const normalizeRecommendedAction = (lead: Lead): SmartLeadAction => {
+    const action = String(lead.score?.recommended_action || "").toLowerCase();
+    if (action === "contact_immediately" || action === "add_to_sequence") return "send_message";
+    if (action === "nurture") return "follow_up";
+    if (action === "skip") return "not_fit";
+    if ((lead.signal_keywords || []).length === 0 || !lead.industry) return "enrich_profile";
+    if (lead.status === "contacted" || lead.status === "replied") return "follow_up";
+    return "send_message";
+  };
+
+  const patchLeadInState = (leadId: string, patch: Partial<Lead>) => {
+    setLeads((prev) => prev.map((item) => (item.id === leadId ? { ...item, ...patch } : item)));
+    setHotLeads((prev) => prev.map((item) => (item.id === leadId ? { ...item, ...patch } : item)));
+  };
+
+  const runLeadAction = async (lead: Lead, action: SmartLeadAction) => {
+    const actionKey = `${lead.id}:${action}`;
+    setActionLoading((prev) => ({ ...prev, [actionKey]: true }));
+    try {
+      if (action === "send_message") {
+        const updated = await leadsAPI.contact(lead.id);
+        patchLeadInState(lead.id, {
+          status: String(updated?.status || "contacted"),
+          message_sent: true,
+        });
+        toast({
+          title: "Message generated",
+          description: `${lead.company || lead.name} marked as contacted.`,
+        });
+        logActivityEvent({
+          type: "message",
+          title: `Message sent to ${lead.company || lead.name}`,
+          description: "Smart Action Panel: Send message",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+        logActivityEvent({
+          type: "status",
+          title: `${lead.company || lead.name} status changed`,
+          description: "Status updated to contacted",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "follow_up") {
+        await leadsAPI.generateEmail(lead.id);
+        if (String(lead.status || "").toLowerCase() === "new") {
+          await leadsAPI.update(lead.id, { status: "contacted" });
+          patchLeadInState(lead.id, { status: "contacted", message_sent: true });
+          logActivityEvent({
+            type: "status",
+            title: `${lead.company || lead.name} status changed`,
+            description: "Status updated to contacted",
+            leadId: lead.id,
+            leadName: lead.name,
+            company: lead.company,
+          });
+        }
+        toast({
+          title: "Follow-up ready",
+          description: `A fresh follow-up email was generated for ${lead.company || lead.name}.`,
+        });
+        logActivityEvent({
+          type: "follow_up",
+          title: `Follow-up generated for ${lead.company || lead.name}`,
+          description: "Smart Action Panel: Follow up",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "enrich_profile") {
+        const enriched = await leadsAPI.enrich(lead.id);
+        patchLeadInState(lead.id, {
+          industry: enriched?.industry ?? lead.industry,
+          signal_keywords: enriched?.signal_keywords ?? lead.signal_keywords,
+          signal_score: enriched?.signal_score ?? lead.signal_score,
+          company_fit_score: enriched?.company_fit_score ?? lead.company_fit_score,
+          score: enriched?.score ?? lead.score,
+        });
+        toast({
+          title: "Profile enriched",
+          description: `${lead.company || lead.name} was re-scored with latest enrichment.`,
+        });
+        logActivityEvent({
+          type: "enrichment",
+          title: `Lead enriched: ${lead.company || lead.name}`,
+          description: "Profile data and score refreshed",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      if (action === "not_fit") {
+        await leadsAPI.update(lead.id, {
+          status: "rejected",
+          ai_notes: "Marked not a fit via Smart Action Panel",
+        });
+        patchLeadInState(lead.id, { status: "rejected" });
+        toast({
+          title: "Marked as not a fit",
+          description: `${lead.company || lead.name} moved to rejected.`,
+        });
+        logActivityEvent({
+          type: "status",
+          title: `${lead.company || lead.name} marked not a fit`,
+          description: "Status changed to rejected",
+          leadId: lead.id,
+          leadName: lead.name,
+          company: lead.company,
+        });
+      }
+
+      logActivityEvent({
+        type: "ai_recommendation",
+        title: `AI recommendation applied on ${lead.company || lead.name}`,
+        description: `Action chosen: ${action.replace("_", " ")}`,
+        leadId: lead.id,
+        leadName: lead.name,
+        company: lead.company,
+      });
+
+      fetchHotLeads();
+    } catch (error: any) {
+      toast({
+        title: "Action failed",
+        description: error?.message || "Could not complete lead action. Please retry.",
+      });
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [actionKey]: false }));
+    }
+  };
+
+  const persistSavedViews = (next: SavedLeadView[]) => {
+    setSavedViews(next);
+    localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(next));
+  };
+
+  const saveCurrentView = () => {
+    const name = viewName.trim();
+    if (!name) {
+      toast({
+        title: "Name required",
+        description: "Enter a view name before saving.",
+      });
+      return;
+    }
+
+    const snapshot: SavedLeadView = {
+      id: activeViewId || `view_${Date.now()}`,
+      name,
+      filters: {
+        activeTab,
+        search,
+        filterPriority,
+        filterStatus,
+        sortBy,
+      },
+    };
+
+    const existingByName = savedViews.find((view) => view.name.toLowerCase() === name.toLowerCase());
+    let next: SavedLeadView[];
+
+    if (activeViewId) {
+      next = savedViews.map((view) => (view.id === activeViewId ? snapshot : view));
+    } else if (existingByName) {
+      snapshot.id = existingByName.id;
+      next = savedViews.map((view) => (view.id === existingByName.id ? snapshot : view));
+    } else {
+      next = [snapshot, ...savedViews].slice(0, 12);
+    }
+
+    persistSavedViews(next);
+    setActiveViewId(snapshot.id);
+    setViewName(snapshot.name);
+    toast({
+      title: "View saved",
+      description: `"${snapshot.name}" is ready to reuse.`,
+    });
+  };
+
+  const applyView = (view: SavedLeadView) => {
+    setActiveTab(view.filters.activeTab);
+    setSearch(view.filters.search);
+    setFilterPriority(view.filters.filterPriority);
+    setFilterStatus(view.filters.filterStatus);
+    setSortBy(view.filters.sortBy);
+    setActiveViewId(view.id);
+    setViewName(view.name);
+  };
+
+  useEffect(() => {
+    if (defaultApplied) return;
+    if (!defaultViewId) {
+      setDefaultApplied(true);
+      return;
+    }
+    const defaultView = savedViews.find((view) => view.id === defaultViewId);
+    if (!defaultView) {
+      localStorage.removeItem(DEFAULT_VIEW_KEY);
+      setDefaultViewId(null);
+      setDefaultApplied(true);
+      return;
+    }
+    applyView(defaultView);
+    setDefaultApplied(true);
+  }, [defaultApplied, defaultViewId, savedViews]);
+
+  const toggleDefaultView = (id: string) => {
+    if (defaultViewId === id) {
+      localStorage.removeItem(DEFAULT_VIEW_KEY);
+      setDefaultViewId(null);
+      toast({
+        title: "Default cleared",
+        description: "This view will no longer auto-load.",
+      });
+      return;
+    }
+
+    localStorage.setItem(DEFAULT_VIEW_KEY, id);
+    setDefaultViewId(id);
+    const selected = savedViews.find((view) => view.id === id);
+    toast({
+      title: "Default view set",
+      description: selected ? `"${selected.name}" will auto-load on page open.` : "Default view will auto-load.",
+    });
+  };
+
+  const deleteView = (id: string) => {
+    const next = savedViews.filter((view) => view.id !== id);
+    persistSavedViews(next);
+    if (activeViewId === id) {
+      setActiveViewId(null);
+      setViewName("");
+    }
+    if (defaultViewId === id) {
+      localStorage.removeItem(DEFAULT_VIEW_KEY);
+      setDefaultViewId(null);
+    }
+  };
+
+  const resetFilters = () => {
+    setActiveTab("all");
+    setSearch("");
+    setFilterPriority("All");
+    setFilterStatus("All");
+    setSortBy("score");
+    setActiveViewId(null);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
@@ -258,6 +566,55 @@ export default function AllLeads() {
 
       <Card className="border-border/50 shadow-sm">
         <CardContent className="p-4">
+          <div className="mb-3 flex flex-col gap-2">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                placeholder="Save current view as..."
+                value={viewName}
+                onChange={(e) => setViewName(e.target.value)}
+                className="sm:max-w-xs"
+              />
+              <Button variant="outline" onClick={saveCurrentView}>
+                {activeViewId ? "Update View" : "Save View"}
+              </Button>
+              <Button variant="ghost" onClick={resetFilters}>
+                Reset Filters
+              </Button>
+            </div>
+            {savedViews.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {savedViews.map((view) => (
+                  <div key={view.id} className="flex items-center gap-1 rounded-full border border-border/60 px-2 py-1">
+                    <button
+                      type="button"
+                      onClick={() => applyView(view)}
+                      className={`text-xs font-medium ${
+                        activeViewId === view.id ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {view.name}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => toggleDefaultView(view.id)}
+                      className={`text-xs ${defaultViewId === view.id ? "text-warning" : "text-muted-foreground hover:text-warning"}`}
+                      aria-label={defaultViewId === view.id ? `Unset default view ${view.name}` : `Set default view ${view.name}`}
+                    >
+                      {defaultViewId === view.id ? "★" : "☆"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteView(view.id)}
+                      className="text-xs text-muted-foreground hover:text-destructive"
+                      aria-label={`Delete view ${view.name}`}
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="flex flex-col sm:flex-row gap-3">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -383,6 +740,12 @@ export default function AllLeads() {
                               <p className="text-sm text-muted-foreground">No signals detected</p>
                             )}
                           </div>
+
+                          <LeadActionPanel
+                            recommendedAction={normalizeRecommendedAction(lead)}
+                            onAction={(action) => runLeadAction(lead, action)}
+                            isLoading={(action) => Boolean(actionLoading[`${lead.id}:${action}`])}
+                          />
                         </div>
 
                         <div className="flex lg:flex-col items-center lg:items-end gap-3 lg:gap-2 shrink-0 lg:min-w-[160px]">
