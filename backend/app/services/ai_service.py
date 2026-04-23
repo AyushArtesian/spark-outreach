@@ -15,6 +15,7 @@ from app.models.campaign import Campaign
 from app.models.embedding import Embedding
 from app.models.lead import Lead
 from app.services.llm_provider import groq_provider
+from app.services.service_scope import is_query_in_service_scope, normalize_service_list
 from app.services.query_generator import build_high_intent_fallback_queries
 from app.services.query_scorer import (
     estimate_search_effectiveness,
@@ -301,99 +302,10 @@ Message:
             )[:320],
         }
 
-        def _normalize_service_list(value: Any) -> List[str]:
-            if not value:
-                return []
-            if isinstance(value, str):
-                raw_items = [value]
-            elif isinstance(value, (list, tuple, set)):
-                raw_items = [str(item) for item in value]
-            else:
-                raw_items = [str(value)]
-
-            cleaned: List[str] = []
-            seen: set[str] = set()
-            for item in raw_items:
-                normalized = re.sub(r"\s+", " ", str(item or "").strip().lower())
-                if not normalized or normalized in seen:
-                    continue
-                seen.add(normalized)
-                cleaned.append(normalized)
-            return cleaned
-
-        requested_services = _normalize_service_list(active_filters.get("services"))
-        profile_services = _normalize_service_list(profile_brief.get("services") or [])
+        requested_services = normalize_service_list(active_filters.get("services"))
+        profile_services = normalize_service_list(profile_brief.get("services") or [])
         if not requested_services:
             requested_services = profile_services
-
-        service_aliases = {
-            "web development": [
-                "web app development",
-                "website development",
-                "website redesign",
-                "website revamp",
-                "frontend development",
-                "backend development",
-            ],
-            "software development": [
-                "custom software",
-                "application development",
-                "product engineering",
-                "software engineering",
-            ],
-            "mobile app": [
-                "app development",
-                "mobile application",
-                "android app",
-                "ios app",
-            ],
-        }
-
-        service_stopwords = {
-            "and",
-            "for",
-            "with",
-            "from",
-            "the",
-            "services",
-            "service",
-            "solutions",
-            "solution",
-            "company",
-            "development",
-        }
-        allowed_service_phrases: set[str] = set()
-        allowed_service_tokens: set[str] = set()
-        for service in requested_services:
-            phrases = [service, *(service_aliases.get(service, []))]
-            for phrase in phrases:
-                normalized_phrase = re.sub(r"\s+", " ", phrase.strip().lower())
-                if not normalized_phrase:
-                    continue
-                allowed_service_phrases.add(normalized_phrase)
-                for token in re.split(r"\W+", normalized_phrase):
-                    token = token.strip()
-                    if len(token) < 4 or token in service_stopwords:
-                        continue
-                    allowed_service_tokens.add(token)
-
-        blocked_offscope_service_terms = {
-            "microsoft dynamics",
-            "dynamics 365",
-            "power apps",
-            "power automate",
-            "sap",
-            "oracle erp",
-            "erp",
-            "crm",
-            "salesforce",
-            "servicenow",
-        }
-        permitted_blocked_terms = {
-            term
-            for term in blocked_offscope_service_terms
-            if any(term in phrase for phrase in allowed_service_phrases)
-        }
 
         location_hint = str(active_filters.get("location") or "").strip()
         if not location_hint:
@@ -632,24 +544,7 @@ Message:
 
         def _passes_service_scope(candidate: str) -> bool:
             """Keep generated queries anchored to requested service filters."""
-            lowered = re.sub(r"\s+", " ", str(candidate or "").lower()).strip()
-            if not lowered or not requested_services:
-                return True
-
-            for term in blocked_offscope_service_terms:
-                if term in lowered and term not in permitted_blocked_terms:
-                    return False
-
-            if any(phrase in lowered for phrase in allowed_service_phrases if len(phrase) >= 4):
-                return True
-
-            matched_tokens = 0
-            for token in allowed_service_tokens:
-                if re.search(rf"\b{re.escape(token)}\b", lowered):
-                    matched_tokens += 1
-                if matched_tokens >= 2:
-                    return True
-            return False
+            return is_query_in_service_scope(candidate, requested_services)
 
         def _filter_live_queries(candidates: List[str], max_items: int) -> List[str]:
             accepted: List[str] = []

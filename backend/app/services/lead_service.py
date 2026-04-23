@@ -7,8 +7,10 @@ from app.models.lead import Lead
 from app.models.company import CompanyProfile
 from app.schemas.lead import LeadCreate, LeadUpdate
 from app.utils.embeddings import embedding_service
-from app.services.web_scraper import _normalize_location_text, analyze_business_signals
+from app.services.web_scraper import _normalize_location_text
+from app.services.business_signal_analyzer import analyze_business_signals
 from app.services.apollo_service import apollo_service
+from app.services.non_buyer_filters import detect_non_buyer_reason, has_strict_procurement_signal
 from app.services.service_catalog import infer_services_from_text
 from datetime import datetime, timedelta
 from bson import ObjectId
@@ -290,95 +292,7 @@ class LeadService:
         Detect non-buyer/service-provider entities that should not enter buyer scoring.
         Returns short reason when matched, else empty string.
         """
-        text = f"{str(company_name or '').lower()} {str(text_blob or '').lower()}"
-        service_provider_phrases = [
-            "web designing company",
-            "web development company",
-            "software development company",
-            "digital agency",
-            "design agency",
-            "ui ux studio",
-            "consulting services",
-            "outsourcing services",
-            "it services company",
-            "app development company",
-        ]
-        seller_marketing_phrases = [
-            "we provide",
-            "we offer",
-            "our services",
-            "our solutions",
-            "hire us",
-            "contact us today",
-            "request a quote",
-            "get quote",
-            "book a demo",
-            "schedule a call",
-            "if you're looking for",
-            "if you are looking for",
-            "you are at the right place",
-            "at the right place",
-            "submit rfp",
-            "attach your rfp",
-        ]
-        seller_service_terms = [
-            "web development",
-            "software development",
-            "app development",
-            "mobile app development",
-            "development services",
-            "it consulting",
-            "digital transformation consulting",
-            "staff augmentation",
-            "outsourcing",
-            "dynamics 365",
-            "power apps",
-            "erp implementation",
-        ]
-        directory_phrases = [
-            "top 10",
-            "top 50",
-            "top 100",
-            "list of",
-            "directory",
-            "best companies",
-            "company rankings",
-        ]
-        job_portal_phrases = [
-            "job portal",
-            "find jobs",
-            "freelance jobs",
-            "hiring platform",
-        ]
-        government_edu_phrases = [
-            "government",
-            "department",
-            "ministry",
-            "university",
-            "college",
-            "school",
-            "institute",
-        ]
-
-        for phrase in service_provider_phrases:
-            if phrase in text:
-                return f"service_provider:{phrase}"
-        has_marketing_phrase = any(phrase in text for phrase in seller_marketing_phrases)
-        has_seller_service_term = any(term in text for term in seller_service_terms)
-        if has_marketing_phrase and has_seller_service_term:
-            return "service_provider:seller_marketing_copy"
-        if re.search(r"\b(if|when)\s+you\s+(need|require|are looking for|looking for)\b", text) and has_seller_service_term:
-            return "service_provider:second_person_service_pitch"
-        for phrase in directory_phrases:
-            if phrase in text:
-                return f"directory:{phrase}"
-        for phrase in job_portal_phrases:
-            if phrase in text:
-                return f"job_portal:{phrase}"
-        for phrase in government_edu_phrases:
-            if phrase in text:
-                return f"non_buyer:{phrase}"
-        return ""
+        return detect_non_buyer_reason(company_name=company_name, text_blob=text_blob)
 
     @staticmethod
     def _ensure_negative_filters(query: str) -> str:
@@ -1614,20 +1528,7 @@ class LeadService:
             is_seller_intent = bool(signal_layer.get("is_seller_intent", False))
 
             if is_seller_intent:
-                strict_procurement_present = any(
-                    token in combined_quality_text
-                    for token in [
-                        "invites bids",
-                        "issued by",
-                        "tender notice",
-                        "proposal due",
-                        "bid submission",
-                        "request for quotation",
-                        "rfq",
-                        "request for information",
-                        "rfi",
-                    ]
-                )
+                strict_procurement_present = has_strict_procurement_signal(combined_quality_text)
                 if not strict_procurement_present:
                     skipped_low_quality += 1
                     print(
