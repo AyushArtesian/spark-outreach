@@ -1,42 +1,55 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Users, Send, Eye, MessageSquare, Flame, Rocket, TrendingUp, TrendingDown, ArrowRight, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { Link } from "react-router-dom";
-import { leadsAPI } from "@/services/api";
+import { campaignsAPI, leadsAPI } from "@/services/api";
 import { toast } from "@/hooks/use-toast";
 
-const stats = [
-  { label: "Total Prospects", value: "12,480", change: "+12.3%", up: true, icon: Users },
-  { label: "Emails Sent", value: "3,240", change: "This week", up: true, icon: Send },
-  { label: "Open Rate", value: "47.3%", change: "+5.2%", up: true, icon: Eye },
-  { label: "Replies", value: "284", change: "+18", up: true, icon: MessageSquare },
-  { label: "Hot Leads 🔥", value: "38", change: "+7", up: true, icon: Flame },
-  { label: "Active Campaigns", value: "5", change: "Running", up: true, icon: Rocket },
-];
+type CampaignRecord = {
+  id: string;
+  title: string;
+  status: string;
+};
 
-const chartData = Array.from({ length: 30 }, (_, i) => ({
-  day: `Day ${i + 1}`,
-  sent: Math.floor(80 + Math.random() * 60),
-  opened: Math.floor(30 + Math.random() * 40),
-  replied: Math.floor(5 + Math.random() * 15),
-}));
+type LeadRecord = {
+  id: string;
+  campaign_id: string;
+  name: string;
+  company?: string;
+  status?: string;
+  message_sent?: boolean;
+  opened?: boolean;
+  replied?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  signal_score?: number;
+  score?: {
+    is_hot_lead?: boolean;
+  };
+};
 
-const activities = [
-  { text: "John Smith opened your email", time: "2 min ago", color: "bg-accent" },
-  { text: "Sarah Lee replied to Follow-up 2", time: "5 min ago", color: "bg-success" },
-  { text: "New prospect batch ready: 340 leads", time: "12 min ago", color: "bg-primary" },
-  { text: "Campaign 'SaaS Founders Q4' completed", time: "1 hr ago", color: "bg-warning" },
-  { text: "AI optimized 23 subject lines", time: "2 hrs ago", color: "bg-primary" },
-];
+const titleCase = (value: string) => {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "Unknown";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
 
-const campaigns = [
-  { name: "SaaS Founders Q4", prospects: 2400, sent: 1820, openRate: "52%", replyRate: "14%", hotLeads: 12, status: "Active" },
-  { name: "E-commerce Directors", prospects: 1800, sent: 1200, openRate: "44%", replyRate: "11%", hotLeads: 8, status: "Active" },
-  { name: "FinTech CEOs", prospects: 3200, sent: 3200, openRate: "38%", replyRate: "9%", hotLeads: 14, status: "Completed" },
-  { name: "Agency Owners", prospects: 1600, sent: 890, openRate: "51%", replyRate: "16%", hotLeads: 4, status: "Active" },
-];
+const formatRelativeTime = (input?: string) => {
+  if (!input) return "just now";
+  const date = new Date(input);
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hr ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+};
+
+const formatPercent = (value: number) => `${value.toFixed(1)}%`;
 
 const statusColors: Record<string, string> = {
   Active: "bg-success/10 text-success",
@@ -51,6 +64,56 @@ export default function DashboardPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [scanId, setScanId] = useState<string | null>(null);
   const [scanMessage, setScanMessage] = useState<string>("");
+  const [campaignsData, setCampaignsData] = useState<CampaignRecord[]>([]);
+  const [leadsData, setLeadsData] = useState<LeadRecord[]>([]);
+  const [hotLeads, setHotLeads] = useState<LeadRecord[]>([]);
+  const [isLoadingDashboard, setIsLoadingDashboard] = useState(true);
+
+  const fetchAllLeads = async (): Promise<LeadRecord[]> => {
+    const pageSize = 200;
+    const maxPages = 10;
+    const all: LeadRecord[] = [];
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const batch: LeadRecord[] = await leadsAPI.all(page * pageSize, pageSize);
+      if (!Array.isArray(batch) || batch.length === 0) {
+        break;
+      }
+      all.push(...batch);
+      if (batch.length < pageSize) {
+        break;
+      }
+    }
+
+    return all;
+  };
+
+  const loadDashboardData = async () => {
+    setIsLoadingDashboard(true);
+    try {
+      const [campaignsRes, leadsRes, hotRes] = await Promise.all([
+        campaignsAPI.list(0, 200),
+        fetchAllLeads(),
+        leadsAPI.hot(500),
+      ]);
+
+      setCampaignsData(Array.isArray(campaignsRes) ? campaignsRes : []);
+      setLeadsData(Array.isArray(leadsRes) ? leadsRes : []);
+      setHotLeads(Array.isArray(hotRes) ? hotRes : []);
+    } catch (error) {
+      console.error("Failed to load dashboard data", error);
+      toast({
+        title: "Dashboard load failed",
+        description: "Could not fetch live data. Please refresh.",
+      });
+    } finally {
+      setIsLoadingDashboard(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
 
   const pollScanStatus = async () => {
     try {
@@ -59,6 +122,7 @@ export default function DashboardPage() {
       if (status === "complete") {
         setIsScanning(false);
         const summary = statusPayload?.summary || {};
+        loadDashboardData();
         toast({
           title: "Intent scan complete",
           description: `Found ${summary.new_leads_found || 0} new leads (${summary.hot_leads || 0} hot).`,
@@ -105,6 +169,150 @@ export default function DashboardPage() {
     }
   };
 
+  const hotLeadIdSet = useMemo(() => new Set(hotLeads.map((lead) => String(lead.id))), [hotLeads]);
+
+  const sentCount = useMemo(
+    () =>
+      leadsData.filter((lead) => {
+        const status = String(lead.status || "").toLowerCase();
+        return Boolean(lead.message_sent) || ["contacted", "replied", "converted"].includes(status);
+      }).length,
+    [leadsData]
+  );
+
+  const openedCount = useMemo(() => leadsData.filter((lead) => Boolean(lead.opened)).length, [leadsData]);
+  const repliedCount = useMemo(() => leadsData.filter((lead) => Boolean(lead.replied)).length, [leadsData]);
+  const activeCampaignsCount = useMemo(
+    () => campaignsData.filter((campaign) => String(campaign.status).toLowerCase() === "active").length,
+    [campaignsData]
+  );
+
+  const stats = useMemo(
+    () => [
+      { label: "Total Prospects", value: leadsData.length.toLocaleString(), change: "Live", up: true, icon: Users },
+      { label: "Emails Sent", value: sentCount.toLocaleString(), change: "Live", up: true, icon: Send },
+      {
+        label: "Open Rate",
+        value: formatPercent(sentCount > 0 ? (openedCount / sentCount) * 100 : 0),
+        change: "Live",
+        up: true,
+        icon: Eye,
+      },
+      { label: "Replies", value: repliedCount.toLocaleString(), change: "Live", up: true, icon: MessageSquare },
+      { label: "Hot Leads", value: hotLeads.length.toLocaleString(), change: "Live", up: true, icon: Flame },
+      { label: "Active Campaigns", value: activeCampaignsCount.toLocaleString(), change: "Running", up: true, icon: Rocket },
+    ],
+    [activeCampaignsCount, hotLeads.length, leadsData.length, openedCount, repliedCount, sentCount]
+  );
+
+  const chartData = useMemo(() => {
+    const days = 30;
+    const now = new Date();
+    const bucketMap: Record<string, { day: string; sent: number; opened: number; replied: number }> = {};
+
+    for (let i = days - 1; i >= 0; i -= 1) {
+      const date = new Date(now);
+      date.setDate(now.getDate() - i);
+      const key = date.toISOString().slice(0, 10);
+      bucketMap[key] = {
+        day: date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+        sent: 0,
+        opened: 0,
+        replied: 0,
+      };
+    }
+
+    for (const lead of leadsData) {
+      const createdAt = lead.created_at ? new Date(lead.created_at) : null;
+      if (!createdAt || Number.isNaN(createdAt.getTime())) continue;
+      const key = createdAt.toISOString().slice(0, 10);
+      if (!bucketMap[key]) continue;
+
+      const status = String(lead.status || "").toLowerCase();
+      const wasSent = Boolean(lead.message_sent) || ["contacted", "replied", "converted"].includes(status);
+      if (wasSent) bucketMap[key].sent += 1;
+      if (lead.opened) bucketMap[key].opened += 1;
+      if (lead.replied) bucketMap[key].replied += 1;
+    }
+
+    return Object.values(bucketMap);
+  }, [leadsData]);
+
+  const activities = useMemo(() => {
+    const sorted = [...leadsData].sort((a, b) => {
+      const aTime = new Date(a.updated_at || a.created_at || 0).getTime();
+      const bTime = new Date(b.updated_at || b.created_at || 0).getTime();
+      return bTime - aTime;
+    });
+
+    const mapped = sorted.slice(0, 5).map((lead) => {
+      const actor = lead.name || lead.company || "A lead";
+      let text = `${actor} was added as a new prospect`;
+      let color = "bg-primary";
+
+      if (lead.replied) {
+        text = `${actor} replied to your outreach`;
+        color = "bg-success";
+      } else if (lead.opened) {
+        text = `${actor} opened your email`;
+        color = "bg-accent";
+      } else if (lead.message_sent || String(lead.status || "").toLowerCase() === "contacted") {
+        text = `Outreach sent to ${actor}`;
+        color = "bg-warning";
+      }
+
+      return {
+        text,
+        time: formatRelativeTime(lead.updated_at || lead.created_at),
+        color,
+      };
+    });
+
+    if (mapped.length > 0) return mapped;
+    return [{ text: "No live activity yet", time: "just now", color: "bg-muted" }];
+  }, [leadsData]);
+
+  const campaigns = useMemo(() => {
+    return campaignsData.map((campaign) => {
+      const related = leadsData.filter((lead) => String(lead.campaign_id) === String(campaign.id));
+      const prospects = related.length;
+      const sent = related.filter((lead) => {
+        const status = String(lead.status || "").toLowerCase();
+        return Boolean(lead.message_sent) || ["contacted", "replied", "converted"].includes(status);
+      }).length;
+      const opened = related.filter((lead) => Boolean(lead.opened)).length;
+      const replied = related.filter((lead) => Boolean(lead.replied)).length;
+      const hotLeadsCount = related.filter((lead) => {
+        return (
+          hotLeadIdSet.has(String(lead.id)) ||
+          Boolean(lead.score?.is_hot_lead) ||
+          Number(lead.signal_score || 0) >= 0.75
+        );
+      }).length;
+
+      return {
+        name: campaign.title,
+        prospects,
+        sent,
+        openRate: sent > 0 ? `${Math.round((opened / sent) * 100)}%` : "0%",
+        replyRate: sent > 0 ? `${Math.round((replied / sent) * 100)}%` : "0%",
+        hotLeads: hotLeadsCount,
+        status: titleCase(campaign.status),
+      };
+    });
+  }, [campaignsData, hotLeadIdSet, leadsData]);
+
+  const aiInsightSummary = useMemo(() => {
+    const openRate = sentCount > 0 ? (openedCount / sentCount) * 100 : 0;
+    const replyRate = sentCount > 0 ? (repliedCount / sentCount) * 100 : 0;
+
+    if (leadsData.length === 0) {
+      return "No lead data yet. Run an intent scan to populate live insights.";
+    }
+
+    return `Live snapshot: ${leadsData.length.toLocaleString()} prospects, ${formatPercent(openRate)} open rate, ${formatPercent(replyRate)} reply rate, and ${hotLeads.length.toLocaleString()} hot leads across ${activeCampaignsCount} active campaigns.`;
+  }, [activeCampaignsCount, hotLeads.length, leadsData.length, openedCount, repliedCount, sentCount]);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -112,7 +320,11 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-display font-bold text-foreground">Dashboard</h1>
           <p className="text-sm text-muted-foreground">Monitor outreach and discover new leads daily.</p>
         </div>
-        <Button onClick={handleRunScan} disabled={isScanning} className="gap-2">
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={loadDashboardData} disabled={isLoadingDashboard}>
+            {isLoadingDashboard ? "Refreshing..." : "Refresh Data"}
+          </Button>
+          <Button onClick={handleRunScan} disabled={isScanning} className="gap-2">
           {isScanning ? (
             <>
               <div className="w-4 h-4 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
@@ -121,7 +333,8 @@ export default function DashboardPage() {
           ) : (
             <>Find New Leads</>
           )}
-        </Button>
+          </Button>
+        </div>
       </div>
 
       {isScanning && (
@@ -193,7 +406,7 @@ export default function DashboardPage() {
           <div className="flex-1">
             <h3 className="font-display font-semibold text-primary-foreground">AI Insight</h3>
             <p className="text-primary-foreground/80 text-sm mt-1">
-              Subject lines with questions get 2.3x more opens. Your Campaign #3 is underperforming — click to auto-optimize.
+              {aiInsightSummary}
             </p>
           </div>
           <Button className="bg-background/20 text-primary-foreground border border-primary-foreground/20 hover:bg-background/30 shrink-0">
@@ -230,7 +443,7 @@ export default function DashboardPage() {
                   <td className="p-4 text-foreground">{c.replyRate}</td>
                   <td className="p-4 text-foreground">{c.hotLeads}</td>
                   <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[c.status]}`}>
+                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[c.status] || "bg-muted text-muted-foreground"}`}>
                       {c.status}
                     </span>
                   </td>

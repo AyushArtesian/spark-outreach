@@ -1,44 +1,66 @@
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Users, Star, Search, TrendingUp, ArrowRight, Sparkles, Target, Zap, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Link } from "react-router-dom";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, BarChart, Bar } from "recharts";
+import { campaignsAPI, leadsAPI } from "@/services/api";
+import { toast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 
-const stats = [
-  { label: "Total Leads Found", value: "1,247", change: "+89 this week", icon: Users, color: "text-primary" },
-  { label: "High Priority", value: "38", change: "Score 8+", icon: Star, color: "text-warning" },
-  { label: "Conversion Rate", value: "23.4%", change: "+4.2% vs last month", icon: TrendingUp, color: "text-success" },
-  { label: "Active Searches", value: "3", change: "Running now", icon: Search, color: "text-accent" },
-];
+type CampaignRecord = {
+  id: string;
+  title: string;
+  status: string;
+  services?: string[];
+  target_locations?: string[];
+  updated_at?: string;
+};
 
-const trendData = Array.from({ length: 14 }, (_, i) => ({
-  day: `Day ${i + 1}`,
-  leads: Math.floor(60 + Math.random() * 80),
-  highPriority: Math.floor(5 + Math.random() * 15),
-}));
+type LeadRecord = {
+  id: string;
+  campaign_id: string;
+  name: string;
+  company?: string;
+  industry?: string;
+  status?: string;
+  message_sent?: boolean;
+  opened?: boolean;
+  replied?: boolean;
+  converted?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  signal_keywords?: string[];
+  company_fit_score?: number;
+  signal_score?: number;
+  score?: {
+    total_score?: number;
+    grade?: "A" | "B" | "C" | "D";
+    is_hot_lead?: boolean;
+  };
+};
 
-const industryData = [
-  { name: "SaaS", leads: 340 },
-  { name: "FinTech", leads: 280 },
-  { name: "Healthcare", leads: 210 },
-  { name: "E-commerce", leads: 190 },
-  { name: "EdTech", leads: 120 },
-];
+const formatRelativeTime = (input?: string) => {
+  if (!input) return "just now";
+  const date = new Date(input);
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.floor(diffMs / 60000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes} min ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} hr ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays} day${diffDays > 1 ? "s" : ""} ago`;
+};
 
-const recentSearches = [
-  { location: "San Francisco, CA", service: "Cloud Migration", leads: 142, date: "2 hours ago" },
-  { location: "New York, NY", service: "AI/ML Development", leads: 89, date: "Yesterday" },
-  { location: "Austin, TX", service: "Mobile App Dev", leads: 67, date: "2 days ago" },
-  { location: "London, UK", service: "DevOps Consulting", leads: 234, date: "3 days ago" },
-];
+const formatPercent = (value: number) => `${value.toFixed(1)}%`;
 
-const topLeads = [
-  { company: "TechVault Inc.", score: 9.4, location: "San Francisco", reason: "Hiring 5 engineers, matches past project", priority: "High" },
-  { company: "NovaPay Systems", score: 8.9, location: "New York", reason: "Series B, expanding tech team", priority: "High" },
-  { company: "GreenLeaf Health", score: 8.2, location: "Austin", reason: "Needs cloud migration, similar to ProjectX", priority: "High" },
-  { company: "DataStream AI", score: 7.8, location: "London", reason: "Posted RFP for ML pipeline", priority: "Medium" },
-];
+const titleCase = (value?: string) => {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "Unknown";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
 
 const priorityColors: Record<string, string> = {
   High: "bg-warning/10 text-warning border-warning/20",
@@ -50,19 +72,264 @@ const container = { hidden: {}, show: { transition: { staggerChildren: 0.06 } } 
 const item = { hidden: { opacity: 0, y: 12 }, show: { opacity: 1, y: 0 } };
 
 export default function LeadDashboard() {
+  const { user } = useAuth();
+  const [campaignsData, setCampaignsData] = useState<CampaignRecord[]>([]);
+  const [leadsData, setLeadsData] = useState<LeadRecord[]>([]);
+  const [hotLeads, setHotLeads] = useState<LeadRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  const fetchAllLeads = async (): Promise<LeadRecord[]> => {
+    const pageSize = 200;
+    const maxPages = 10;
+    const all: LeadRecord[] = [];
+
+    for (let page = 0; page < maxPages; page += 1) {
+      const batch: LeadRecord[] = await leadsAPI.all(page * pageSize, pageSize);
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      all.push(...batch);
+      if (batch.length < pageSize) break;
+    }
+
+    return all;
+  };
+
+  const loadDashboardData = async () => {
+    setIsLoading(true);
+    try {
+      const [campaignsRes, leadsRes, hotRes] = await Promise.all([
+        campaignsAPI.list(0, 200),
+        fetchAllLeads(),
+        leadsAPI.hot(200),
+      ]);
+
+      setCampaignsData(Array.isArray(campaignsRes) ? campaignsRes : []);
+      setLeadsData(Array.isArray(leadsRes) ? leadsRes : []);
+      setHotLeads(Array.isArray(hotRes) ? hotRes : []);
+    } catch (error) {
+      console.error("Failed to load lead dashboard", error);
+      toast({
+        title: "Dashboard load failed",
+        description: "Could not fetch live dashboard data.",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDashboardData();
+  }, []);
+
+  const activeCampaignCount = useMemo(
+    () => campaignsData.filter((campaign) => String(campaign.status || "").toLowerCase() === "active").length,
+    [campaignsData]
+  );
+
+  const thisWeekCount = useMemo(() => {
+    const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return leadsData.filter((lead) => {
+      const ts = new Date(lead.created_at || 0).getTime();
+      return Number.isFinite(ts) && ts >= oneWeekAgo;
+    }).length;
+  }, [leadsData]);
+
+  const sentCount = useMemo(
+    () =>
+      leadsData.filter((lead) => {
+        const status = String(lead.status || "").toLowerCase();
+        return Boolean(lead.message_sent) || ["contacted", "replied", "converted"].includes(status);
+      }).length,
+    [leadsData]
+  );
+
+  const convertedCount = useMemo(
+    () =>
+      leadsData.filter((lead) => {
+        const status = String(lead.status || "").toLowerCase();
+        return Boolean(lead.converted) || status === "converted";
+      }).length,
+    [leadsData]
+  );
+
+  const conversionRate = sentCount > 0 ? (convertedCount / sentCount) * 100 : 0;
+
+  const stats = useMemo(
+    () => [
+      {
+        label: "Total Leads Found",
+        value: leadsData.length.toLocaleString(),
+        change: `+${thisWeekCount.toLocaleString()} this week`,
+        icon: Users,
+        color: "text-primary",
+      },
+      {
+        label: "High Priority",
+        value: hotLeads.length.toLocaleString(),
+        change: "Hot leads",
+        icon: Star,
+        color: "text-warning",
+      },
+      {
+        label: "Conversion Rate",
+        value: formatPercent(conversionRate),
+        change: `${convertedCount.toLocaleString()} converted`,
+        icon: TrendingUp,
+        color: "text-success",
+      },
+      {
+        label: "Active Searches",
+        value: activeCampaignCount.toLocaleString(),
+        change: "Live from campaigns",
+        icon: Search,
+        color: "text-accent",
+      },
+    ],
+    [activeCampaignCount, convertedCount, conversionRate, hotLeads.length, leadsData.length, thisWeekCount]
+  );
+
+  const trendData = useMemo(() => {
+    const days = 14;
+    const now = new Date();
+    const bucketMap: Record<string, { day: string; leads: number; highPriority: number }> = {};
+
+    for (let i = days - 1; i >= 0; i -= 1) {
+      const date = new Date(now);
+      date.setDate(now.getDate() - i);
+      const key = date.toISOString().slice(0, 10);
+      bucketMap[key] = {
+        day: date.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+        leads: 0,
+        highPriority: 0,
+      };
+    }
+
+    for (const lead of leadsData) {
+      const createdAt = lead.created_at ? new Date(lead.created_at) : null;
+      if (!createdAt || Number.isNaN(createdAt.getTime())) continue;
+      const key = createdAt.toISOString().slice(0, 10);
+      if (!bucketMap[key]) continue;
+
+      bucketMap[key].leads += 1;
+      if (lead.score?.is_hot_lead || hotLeads.some((hotLead) => hotLead.id === lead.id)) {
+        bucketMap[key].highPriority += 1;
+      }
+    }
+
+    return Object.values(bucketMap);
+  }, [hotLeads, leadsData]);
+
+  const industryData = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const lead of leadsData) {
+      const key = titleCase(lead.industry || "Unknown");
+      counts[key] = (counts[key] || 0) + 1;
+    }
+
+    const rows = Object.entries(counts)
+      .map(([name, leads]) => ({ name, leads }))
+      .sort((a, b) => b.leads - a.leads)
+      .slice(0, 5);
+
+    if (rows.length > 0) return rows;
+    return [{ name: "No Data", leads: 0 }];
+  }, [leadsData]);
+
+  const recentSearches = useMemo(() => {
+    const leadsByCampaign = leadsData.reduce<Record<string, number>>((acc, lead) => {
+      const key = String(lead.campaign_id || "");
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    const items = campaignsData
+      .slice()
+      .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
+      .slice(0, 4)
+      .map((campaign) => {
+        const location = campaign.target_locations?.[0] || "Any location";
+        const service = campaign.services?.[0] || campaign.title;
+        return {
+          id: campaign.id,
+          location,
+          service,
+          leads: leadsByCampaign[String(campaign.id)] || 0,
+          date: formatRelativeTime(campaign.updated_at),
+        };
+      });
+
+    if (items.length > 0) return items;
+    return [{ id: "no-data", location: "No searches yet", service: "Create a campaign", leads: 0, date: "just now" }];
+  }, [campaignsData, leadsData]);
+
+  const topLeads = useMemo(() => {
+    const normalized = leadsData
+      .slice()
+      .sort((a, b) => {
+        const scoreA = Number(a.score?.total_score || 0);
+        const scoreB = Number(b.score?.total_score || 0);
+        if (scoreA !== scoreB) return scoreB - scoreA;
+        return Number(b.signal_score || 0) - Number(a.signal_score || 0);
+      })
+      .slice(0, 4)
+      .map((lead) => {
+        const totalScore = Number(lead.score?.total_score || 0);
+        const priority = totalScore >= 80 || lead.score?.grade === "A" ? "High" : totalScore >= 60 || lead.score?.grade === "B" ? "Medium" : "Low";
+        const reasonFromSignals = Array.isArray(lead.signal_keywords) && lead.signal_keywords.length > 0
+          ? lead.signal_keywords.slice(0, 2).join(", ")
+          : "Strong fit from current signals";
+
+        return {
+          id: lead.id,
+          company: lead.company || lead.name,
+          score: totalScore > 0 ? totalScore / 10 : Number((Number(lead.signal_score || 0) * 10).toFixed(1)),
+          location: lead.industry || "Unknown industry",
+          reason: reasonFromSignals,
+          priority,
+        };
+      });
+
+    if (normalized.length > 0) return normalized;
+    return [{ id: "no-lead", company: "No leads yet", score: 0, location: "-", reason: "Run a lead search to see top matches", priority: "Low" }];
+  }, [leadsData]);
+
+  const aiRecommendation = useMemo(() => {
+    if (leadsData.length === 0) {
+      return "No lead data available yet. Run a search or intent scan to generate recommendations.";
+    }
+
+    const bestIndustry = industryData[0]?.name || "your target segment";
+    return `Live signal: ${bestIndustry} currently leads with ${industryData[0]?.leads || 0} prospects. You have ${hotLeads.length} hot leads and ${convertedCount} conversions so far.`;
+  }, [convertedCount, hotLeads.length, industryData, leadsData.length]);
+
+  const firstName = (user?.full_name || user?.username || "there").split(" ")[0];
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="text-center">
+          <div className="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin mx-auto mb-4" />
+          <p className="text-muted-foreground">Loading live dashboard data...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Welcome */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-display font-bold text-foreground">Welcome back, John</h1>
+          <h1 className="text-2xl font-display font-bold text-foreground">Welcome back, {firstName}</h1>
           <p className="text-muted-foreground text-sm mt-1">Here's your lead intelligence overview</p>
         </div>
-        <Link to="/search">
-          <Button variant="gradient" size="lg" className="gap-2">
-            <Search className="w-4 h-4" /> Search Leads
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={loadDashboardData}>Refresh</Button>
+          <Link to="/search">
+            <Button variant="gradient" size="lg" className="gap-2">
+              <Search className="w-4 h-4" /> Search Leads
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Stats */}
@@ -146,7 +413,7 @@ export default function LeadDashboard() {
             <CardContent>
               <div className="space-y-3">
                 {recentSearches.map((s, i) => (
-                  <div key={i} className="flex items-center justify-between p-2.5 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer">
+                  <div key={s.id || i} className="flex items-center justify-between p-2.5 rounded-xl bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer">
                     <div>
                       <div className="text-sm font-medium text-foreground">{s.location}</div>
                       <div className="text-xs text-muted-foreground">{s.service}</div>
@@ -174,7 +441,7 @@ export default function LeadDashboard() {
               <div className="flex-1">
                 <h3 className="font-display font-semibold text-foreground">AI Recommendation</h3>
                 <p className="text-muted-foreground text-sm mt-1">
-                  Based on your past wins, <strong className="text-foreground">FinTech companies in New York</strong> hiring backend engineers have a 3.2x higher conversion rate. We found 12 new matches today.
+                  {aiRecommendation}
                 </p>
               </div>
               <Link to="/search">
@@ -201,7 +468,7 @@ export default function LeadDashboard() {
           <CardContent>
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
               {topLeads.map((lead) => (
-                <Link key={lead.company} to="/lead/1" className="block">
+                <Link key={lead.id} to={lead.id === "no-lead" ? "/search" : `/lead/${lead.id}`} className="block">
                   <div className="p-4 rounded-xl border border-border/50 hover:border-primary/30 hover:shadow-md transition-all group cursor-pointer">
                     <div className="flex items-center justify-between mb-2">
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${priorityColors[lead.priority]}`}>
